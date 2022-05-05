@@ -15,11 +15,6 @@ import (
 )
 
 
-func distance_deformation(distance int, filtration_value int) int {
-	modified_distance := distance + filtration_value
-	return modified_distance
-}
-
 
 
 func main() {
@@ -28,23 +23,26 @@ func main() {
 	var fltr_file_name string
 	var write_to_file_name string
 	var threads string
-	// var filtration_path string
+	var sub_fltr_input string
 
 	var compressed_dist_file bool
 	var compress_out_file bool
 	var ripser bool
+	var debug bool
 	var help bool
 
 	// Parse command line options
 	flag.StringVar(&dist_file_name, "dist_file", "", "distance file name")
-	flag.StringVar(&fltr_file_name, "fltr_file", "", "filtration file name")
-	flag.StringVar(&write_to_file_name, "write_to", "", "write modified distance to file")
+	flag.StringVar(&fltr_file_name, "fltr_file", "", "filtration file name. Each row gives filtration value of corresponding data point.\n Format i,j,k,... (interpreted with lexicraphical order)")
+	flag.StringVar(&write_to_file_name, "write_to", "", "write modified distance to specified file")
 	flag.StringVar(&threads, "threads", "", "number of threads")
+	flag.StringVar(&sub_fltr_input, "sub_fltr", "", "sub-filtration along which to compute 1d persistence.\n Format: [r0,i0,j0,k0,...]-- ... --(rn,in,jn,kn,...)")
 
 	flag.BoolVar(&compressed_dist_file, "compressed_dist_file", false, "Is distance file compressed?")
 	flag.BoolVar(&compress_out_file, "compress_out_file", false, "Compress timedist file?")
 	flag.BoolVar(&ripser, "ripser", false, "Run ripser?")
-	flag.BoolVar(&help, "h", false, "Get help message")
+	flag.BoolVar(&debug, "debug", false, "print some messages for debugging purposes?")
+	flag.BoolVar(&help, "help", false, "Get help message")
 	flag.Parse()
 
 	// print help message
@@ -61,7 +59,10 @@ func main() {
 		log.Fatal("filtration file name required (--fltr_file)")
 	}
 	if write_to_file_name == "" {
-		log.Fatal("output file name currently required (--write_to)")
+		log.Fatal("output file name (currently) required (--write_to)")
+	}
+	if sub_fltr_input == "" {
+		log.Fatal("sub-filtration is required (--sub_fltr)")
 	}
 
 
@@ -71,21 +72,39 @@ func main() {
 		log.Fatalf("Failed to open file '%s': %v", fltr_file_name, err)
 	}
 
-	var fltr_values []int
+	var fltr_list [][]int
 	fltr_scanner := bufio.NewScanner(fltr_file)
 	for fltr_scanner.Scan() {
-		s, err := strconv.Atoi(fltr_scanner.Text())
-		if err != nil {
-			log.Fatalf("Filtration parse error: %v", err)
+		var row []int
+			for _, v := range strings.Split(fltr_scanner.Text(),",") {
+				s, err := strconv.Atoi(v)
+				if err != nil {
+					log.Fatalf("Filtration parse error: %v", err)
+				}
+				row = append(row, s)
 		}
-		fltr_values = append(fltr_values, s)
+		fltr_list = append(fltr_list, row)
 	}
 	// Close ids file
 	fltr_file.Close()
 
-	// fmt.Println("filtration values", fltr_values)
 
-	// ToDo: activate automatic conversion from date-isostring to filtration, e.g. via unix seconds
+	var sub_fltr [][]int
+	for _, p := range strings.Split(sub_fltr_input,"--"){
+		var point []int
+		for _, q := range strings.Split(strings.Trim(p, "[]"),","){
+			s, err := strconv.Atoi(q)
+			if err != nil {
+				log.Fatalf("Filtration parse error: %v", err)
+			}
+			point = append(point, s)
+		}
+		sub_fltr = append(sub_fltr, point)
+	}
+
+
+	// ToDo: allow floats as filtration values
+	// ToDo: implement automatic conversion from date-isostring to filtration, e.g. via unix seconds
 	// Note: Will also need to convert the given path from isostring into unix seconds
 	// // Compute time differences in days to start_date
 	// var time_diff []int
@@ -102,6 +121,10 @@ func main() {
 	// 			int(t.Sub(start_date).Hours()/24))
 	// }
 
+	if debug == true {
+	fmt.Println("filtration list", fltr_list)
+	fmt.Println("sub filtration", sub_fltr)
+	}
 
 	type workload struct {
 		i    int
@@ -194,32 +217,61 @@ func main() {
 	// Worker function
 	worker := func(in chan workload, out chan string) {
 		var sb strings.Builder
-		// var fltr_value int
 
 		for w := range in {
 			// clear string builder for new matrix line
 			sb.Reset()
+			i := w.i
 
-			// Split matrix line at separator
+			// Split line of distance matrix into the single distances at separator
 			splitLine := strings.Split(w.text, ",")
 
-			for _, token := range splitLine {
-				// convert string to int
+			for j, token := range splitLine {
+				var modified_distance int
+				// convert distance string to int
 				distance, err := strconv.Atoi(token)
 				if err != nil {
 					log.Fatalf("Distance conversion error: %v", err)
 				}
+				// calculate deformation for pair of datapoints (w.i,j), see article.
+				// reminder: sub_fltr_idx[0] is the Rips parameter
+				D := len(sub_fltr)
+				for k, sub_fltr_idx := range sub_fltr {
+					cond1 := false
+					for a:= 0; a<len(fltr_list[i]); a++ {
+						if (fltr_list[i][a] <= sub_fltr_idx[a+1]) {
+							cond1 = true
+							break
+						}
+					}
+					cond2 := false
+					for a:= 0; a<len(fltr_list[i]); a++ {
+						if fltr_list[j][a] <= sub_fltr_idx[a+1] {
+							cond2 = true
+							break
+						}
+					}
 
-				modified_distance := distance_deformation(distance, fltr_values[w.i])
-				// fmt.Println("distance", distance, "filtration value", fltr_values[w.i], "modified_distance", modified_distance)
+					if (cond1 || cond2) {
+						D = k
+						break
+					}
 
+				}
+
+				var deformation int
+				for _, sub_fltr_idx:= range sub_fltr[0:D] {
+						deformation += sub_fltr_idx[0]
+				}
+				modified_distance = distance + deformation
+				if debug == true {
+					fmt.Println(i, j, ":", "neither is in filtr. step(s)", sub_fltr[0:D], "-> D=", D, "deformation=", deformation, "\n", "dist(", i, ",", j, ")=", distance, "-> mod_dist(", i, ",", j, ")=", modified_distance)
+				}
 				sb.WriteString(strconv.Itoa(modified_distance)) // write modified distance
 				sb.WriteByte(',')                               // write separator
 			}
-			joinLine := sb.String()
-
-
 			// Send modified matrix line to writer
+			joinLine := sb.String()
 			out <- joinLine[:len(joinLine)-1]
 		}
 
@@ -304,7 +356,15 @@ func main() {
 	writer(toWriter)
 
 	if ripser {
-		cmd := exec.Command("ripser", write_to_file_name)
+		var max_deformation_int int
+		for _, sub_fltr_idx:= range sub_fltr {
+				max_deformation_int += sub_fltr_idx[0]
+		}
+		if debug == true {
+		fmt.Println(max_deformation_int)
+		}
+		max_deformation_str := strconv.Itoa(max_deformation_int)
+		cmd := exec.Command("ripser", write_to_file_name, "--threshold", max_deformation_str)
 		cmd.Wait()
 		output, err := cmd.CombinedOutput()
 		if err != nil {
