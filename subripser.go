@@ -15,10 +15,24 @@ import (
 )
 
 
+func leq(poset_element1 []int, poset_element2 []int) bool {
+	var L int
+	if len(poset_element1) <= len(poset_element2) {
+		L = len(poset_element1)
+	} else {
+		L = len(poset_element2)
+	}
+	for a:= 0; a<L; a++ {
+		if (poset_element1[a] > poset_element2[a]) {
+			return false
+		}
+	}
+	return true
+}
+
 
 
 func main() {
-	// const time_layout = "2006-01-02"
 	var dist_file_name string
 	var fltr_file_name string
 	var write_to_file_name string
@@ -102,6 +116,13 @@ func main() {
 		sub_fltr = append(sub_fltr, point)
 	}
 
+	var max_deformation_int int
+	for _, sub_fltr_idx:= range sub_fltr {
+			max_deformation_int += sub_fltr_idx[0]
+	}
+	max_deformation_int++
+
+
 
 	// ToDo: allow floats as filtration values
 	// ToDo: implement automatic conversion from date-isostring to filtration, e.g. via unix seconds
@@ -124,6 +145,7 @@ func main() {
 	if debug == true {
 	fmt.Println("filtration list", fltr_list)
 	fmt.Println("sub filtration", sub_fltr)
+	fmt.Println("max possible deformation (= ripser threshold) =",max_deformation_int)
 	}
 
 	type workload struct {
@@ -233,39 +255,28 @@ func main() {
 				if err != nil {
 					log.Fatalf("Distance conversion error: %v", err)
 				}
-				// calculate deformation for pair of datapoints (w.i,j), see article.
-				// reminder: sub_fltr_idx[0] is the Rips parameter
-				D := len(sub_fltr)
+				// Goal: Determine deformation for pair of datapoints (x_i,x_j), see article.
+				// 1st step. find max(D(x),D(y)) ~ point in the subfiltration from where both x and y are contained.
+				var D int
 				for k, sub_fltr_idx := range sub_fltr {
-					cond1 := false
-					for a:= 0; a<len(fltr_list[i]); a++ {
-						if (fltr_list[i][a] <= sub_fltr_idx[a+1]) {
-							cond1 = true
-							break
-						}
-					}
-					cond2 := false
-					for a:= 0; a<len(fltr_list[i]); a++ {
-						if fltr_list[j][a] <= sub_fltr_idx[a+1] {
-							cond2 = true
-							break
-						}
-					}
-
-					if (cond1 || cond2) {
+					if leq(fltr_list[i], sub_fltr_idx[1:]) && leq(fltr_list[j], sub_fltr_idx[1:]) {
 						D = k
 						break
 					}
-
 				}
-
+				// 2nd step. Determine deformation value, depends on distance(x,y)
 				var deformation int
-				for _, sub_fltr_idx:= range sub_fltr[0:D] {
+				if distance <= sub_fltr[D][0] {// reminder: sub_fltr[x][0] is the Vietoris-Rips parameter of the xth point in the sub filtration
+					for _, sub_fltr_idx:= range sub_fltr[0:D] {
 						deformation += sub_fltr_idx[0]
+					}
+				} else {
+					deformation = max_deformation_int
 				}
+				// 3rd step. calculate modified distance
 				modified_distance = distance + deformation
 				if debug == true {
-					fmt.Println(i, j, ":", "neither is in filtr. step(s)", sub_fltr[0:D], "-> D=", D, "deformation=", deformation, "\n", "dist(", i, ",", j, ")=", distance, "-> mod_dist(", i, ",", j, ")=", modified_distance)
+					fmt.Println("pair (",i,",", j,")", "not both contained in filtr. step(s)", sub_fltr[0:D], "-> D=", D, ", deformation=", deformation, ":", "dist(", i, ",", j, ")=", distance, "-> mod_dist(", i, ",", j, ")=", modified_distance)
 				}
 				sb.WriteString(strconv.Itoa(modified_distance)) // write modified distance
 				sb.WriteByte(',')                               // write separator
@@ -356,15 +367,10 @@ func main() {
 	writer(toWriter)
 
 	if ripser {
-		var max_deformation_int int
-		for _, sub_fltr_idx:= range sub_fltr {
-				max_deformation_int += sub_fltr_idx[0]
-		}
-		if debug == true {
-		fmt.Println(max_deformation_int)
-		}
 		max_deformation_str := strconv.Itoa(max_deformation_int)
-		cmd := exec.Command("ripser", write_to_file_name, "--threshold", max_deformation_str)
+		// cmd := exec.Command("ripser", "--threshold", max_deformation_str, "--format", "lower-distance", write_to_file_name)
+		_ = max_deformation_str
+		cmd := exec.Command("ripser", "--format", "lower-distance", write_to_file_name)
 		cmd.Wait()
 		output, err := cmd.CombinedOutput()
 		if err != nil {
