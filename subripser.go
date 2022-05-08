@@ -30,12 +30,26 @@ func leq(poset_element1 []int, poset_element2 []int) bool {
 	return true
 }
 
+func equal(poset_element1 []int, poset_element2 []int) bool {
+	var L int
+	if len(poset_element1) <= len(poset_element2) {
+		L = len(poset_element1)
+	} else {
+		L = len(poset_element2)
+	}
+	for a:= 0; a<L; a++ {
+		if (poset_element1[a] != poset_element2[a]) {
+			return false
+		}
+	}
+	return true
+}
 
 
 func main() {
 	var dist_file_name string
 	var fltr_file_name string
-	var write_to_file_name string
+	var to_file string
 	var threads string
 	var sub_fltr_input string
 
@@ -43,19 +57,21 @@ func main() {
 	var compress_out_file bool
 	var ripser bool
 	var debug bool
+	var verbose bool
 	var help bool
 
 	// Parse command line options
 	flag.StringVar(&dist_file_name, "dist_file", "", "distance file name")
 	flag.StringVar(&fltr_file_name, "fltr_file", "", "filtration file name. Each row gives filtration value of corresponding data point.\n Format i,j,k,... (interpreted with lexicraphical order)")
-	flag.StringVar(&write_to_file_name, "write_to", "", "write modified distance to specified file")
+	flag.StringVar(&to_file, "to_file", "", "write modified distance to specified file")
 	flag.StringVar(&threads, "threads", "", "number of threads")
-	flag.StringVar(&sub_fltr_input, "sub_fltr", "", "sub-filtration along which to compute 1d persistence.\n Format: [r0,i0,j0,k0,...]-- ... --(rn,in,jn,kn,...)")
+	flag.StringVar(&sub_fltr_input, "sub_fltr", "", "sub-filtration along which to compute 1d persistence.\n Format: [VR_0, i_0, j_0, k_0,...]-- ... --(VR_n, i_n, j_n, k_n,...)")
 
 	flag.BoolVar(&compressed_dist_file, "compressed_dist_file", false, "Is distance file compressed?")
 	flag.BoolVar(&compress_out_file, "compress_out_file", false, "Compress timedist file?")
-	flag.BoolVar(&ripser, "ripser", false, "Run ripser?")
-	flag.BoolVar(&debug, "debug", false, "print some messages for debugging purposes?")
+	flag.BoolVar(&ripser, "ripser", false, "run ripser?")
+	flag.BoolVar(&debug, "debug", false, "show messages for debugging purposes?")
+	flag.BoolVar(&verbose, "verbose", false, "show status messages?")
 	flag.BoolVar(&help, "help", false, "Get help message")
 	flag.Parse()
 
@@ -72,11 +88,8 @@ func main() {
 	if fltr_file_name == "" {
 		log.Fatal("filtration file name required (--fltr_file)")
 	}
-	if write_to_file_name == "" {
-		log.Fatal("output file name (currently) required (--write_to)")
-	}
-	if sub_fltr_input == "" {
-		log.Fatal("sub-filtration is required (--sub_fltr)")
+	if to_file == "" {
+		log.Fatal("output file name (currently) required (--to_file)")
 	}
 
 
@@ -99,28 +112,49 @@ func main() {
 		}
 		fltr_list = append(fltr_list, row)
 	}
-	// Close ids file
+	// Close filtration file
 	fltr_file.Close()
 
 
 	var sub_fltr [][]int
-	for _, p := range strings.Split(sub_fltr_input,"--"){
-		var point []int
-		for _, q := range strings.Split(strings.Trim(p, "[]"),","){
-			s, err := strconv.Atoi(q)
-			if err != nil {
-				log.Fatalf("Filtration parse error: %v", err)
+	if sub_fltr_input != "" {
+		// Parse sub filtration from command line input
+		for _, p := range strings.Split(sub_fltr_input,"--"){
+			var point []int
+			for _, q := range strings.Split(strings.Trim(p, " []"),","){
+				s, err := strconv.Atoi(q)
+				if err != nil {
+					log.Fatalf("Filtration parse error: %v", err)
+				}
+				point = append(point, s)
 			}
-			point = append(point, s)
+			sub_fltr = append(sub_fltr, point)
 		}
-		sub_fltr = append(sub_fltr, point)
+		// Check if sub filtration is valid (i.e. in lexicographical order)
+		for i, j := 0, 1; j < len(sub_fltr); i, j = i+1, j+1 {
+			if !(leq(sub_fltr[i], sub_fltr[j])) {
+				log.Fatalf("Invalid sub-filtration: sub_fltr[%v] = %v !<= %v = sub_fltr[%v]", i, sub_fltr[i], sub_fltr[j], j)
+			}
+		}
+	} else {
+		// Extract a valid sub filtration from the filtration file (traverse through list once and successively add larger elements)
+		sub_fltr = append(sub_fltr, append([]int{0}, fltr_list[0]...))
+		for _, x := range fltr_list {
+			x = append([]int{1}, x...)
+			if leq(sub_fltr[len(sub_fltr)-1], x) && !equal(sub_fltr[len(sub_fltr)-1], x) {
+				sub_fltr = append(sub_fltr, x)
+			}
+		}
 	}
 
-	var max_deformation_int int
-	for _, sub_fltr_idx:= range sub_fltr {
-			max_deformation_int += sub_fltr_idx[0]
+
+	var max_deformation int
+	for _, x := range sub_fltr {
+			max_deformation += x[0]
 	}
-	max_deformation_int++
+	max_deformation++
+
+	ripser_threshold := 2*max_deformation
 
 
 
@@ -142,10 +176,11 @@ func main() {
 	// 			int(t.Sub(start_date).Hours()/24))
 	// }
 
-	if debug == true {
+	if (verbose == true) || (debug == true) {
 	fmt.Println("filtration list", fltr_list)
 	fmt.Println("sub filtration", sub_fltr)
-	fmt.Println("max possible deformation (= ripser threshold) =",max_deformation_int)
+	fmt.Println("max possible deformation =",max_deformation)
+	fmt.Println("ripser threshold =", ripser_threshold)
 	}
 
 	type workload struct {
@@ -256,28 +291,41 @@ func main() {
 					log.Fatalf("Distance conversion error: %v", err)
 				}
 				// Goal: Determine deformation for pair of datapoints (x_i,x_j), see article.
-				// 1st step. find max(D(x),D(y)) ~ point in the subfiltration from where both x and y are contained.
-				var D int
-				for k, sub_fltr_idx := range sub_fltr {
-					if leq(fltr_list[i], sub_fltr_idx[1:]) && leq(fltr_list[j], sub_fltr_idx[1:]) {
-						D = k
-						break
+				deformation := 0
+				if distance != 0 {
+					// 1st step. find max(D(x),D(y)) ~ point in the subfiltration from where on both x and y are contained.
+					both_in_sub_fltr := false
+					var D int
+					for k, x := range sub_fltr {
+						if leq(fltr_list[i], x[1:]) && leq(fltr_list[j], x[1:]) {
+							D = k
+							both_in_sub_fltr = true
+							break
+						}
 					}
-				}
-				// 2nd step. Determine deformation value, depends on distance(x,y)
-				var deformation int
-				if distance <= sub_fltr[D][0] {// reminder: sub_fltr[x][0] is the Vietoris-Rips parameter of the xth point in the sub filtration
-					for _, sub_fltr_idx:= range sub_fltr[0:D] {
-						deformation += sub_fltr_idx[0]
+					// 2nd step. Determine deformation value, depends on distance(x,y)
+					// reminder: sub_fltr[x][0] is the Vietoris-Rips parameter of the xth filtration value in the sub filtration
+					d := D
+					if both_in_sub_fltr {
+						for sub_fltr[d][0] == 0 && d < len(sub_fltr)-1 {
+							d++
+						}
+						if (distance <= sub_fltr[d][0]) {
+							for _, x:= range sub_fltr[0:d+1] {
+								deformation += x[0]
+							}
+						} else {
+							deformation = max_deformation
+						}
+					} else {
+						deformation = ripser_threshold
 					}
-				} else {
-					deformation = max_deformation_int
+					if debug == true {
+						fmt.Println("points (",i,",", j,")", "not both contained in filtr. step(s)", sub_fltr[0:D], "-> D=", D, "; dist(", i, ",", j, ")=", distance, "sub_fltr[d][0]=", sub_fltr[d][0], "dist <= sub_fltr[d][0] ", distance<=sub_fltr[d][0], "; deformation=", deformation, "=>", "mod_dist(", i, ",", j, ")=", distance+deformation)
+					}
 				}
 				// 3rd step. calculate modified distance
 				modified_distance = distance + deformation
-				if debug == true {
-					fmt.Println("pair (",i,",", j,")", "not both contained in filtr. step(s)", sub_fltr[0:D], "-> D=", D, ", deformation=", deformation, ":", "dist(", i, ",", j, ")=", distance, "-> mod_dist(", i, ",", j, ")=", modified_distance)
-				}
 				sb.WriteString(strconv.Itoa(modified_distance)) // write modified distance
 				sb.WriteByte(',')                               // write separator
 			}
@@ -296,15 +344,15 @@ func main() {
 		var out_writer *bufio.Writer
 		if !compress_out_file {
 			// read in file
-			out_file, err := os.Create(write_to_file_name)
+			out_file, err := os.Create(to_file)
 			if err != nil {
-				log.Fatalf("Failed to create file '%s': %v", write_to_file_name, err)
+				log.Fatalf("Failed to create file '%s': %v", to_file, err)
 			}
 			defer out_file.Close()
 			out_writer = bufio.NewWriter(out_file)
 		} else {
 			// Command to execute
-			cmd := exec.Command("zstd", "-T0", "--force", "--quiet", "-", "-o", write_to_file_name)
+			cmd := exec.Command("zstd", "-T0", "--force", "--quiet", "-", "-o", to_file)
 
 			// Connect command stdin to out_writer
 			outPipe, err := cmd.StdinPipe()
@@ -367,11 +415,10 @@ func main() {
 	writer(toWriter)
 
 	if ripser {
-		max_deformation_str := strconv.Itoa(max_deformation_int)
-		// cmd := exec.Command("ripser", "--threshold", max_deformation_str, "--format", "lower-distance", write_to_file_name)
-		_ = max_deformation_str
-		cmd := exec.Command("ripser", "--format", "lower-distance", write_to_file_name)
-		cmd.Wait()
+		cmd := exec.Command("ripser", "--format", "lower-distance", "--threshold", strconv.Itoa(ripser_threshold), to_file)
+		// _ = ripser_threshold
+		// cmd := exec.Command("ripser", "--format", "lower-distance", to_file)
+		// cmd.Wait()
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			log.Fatalf("Failed to run command: %v\nCommand output: %s", err, string(output))
