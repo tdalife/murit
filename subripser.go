@@ -311,7 +311,7 @@ func main() {
 							d++
 						}
 						if (distance <= sub_fltr[d][0]) {
-							for _, x:= range sub_fltr[0:d+1] {
+							for _, x:= range sub_fltr[0:d] {
 								deformation += x[0]
 							}
 						} else {
