@@ -24,7 +24,6 @@ type workload struct {
 type args struct{
   sub_fltr [][]float64
   fltr_list [][]float64
-  debug bool
 }
 
 
@@ -121,14 +120,6 @@ func worker(in chan workload, out chan string, b args) {
           break
         }
       }
-      // Some output for debugging purposes
-      if b.debug == true {
-        if modified_distance != len(b.sub_fltr){
-          fmt.Println("edge (",w.i,",", j,"): ", "dist(", w.i, ",", j, ")=", distance, "-> fltr_point_i=", fltr_point_i, ", fltr_point_j=", fltr_point_j, ";", "both contained starting at b.sub_fltr[",modified_distance,"]=", b.sub_fltr[modified_distance], "  mod_dist(", w.i, ",", j, ")=", modified_distance)
-        } else {
-          fmt.Println("edge (",w.i,",", j,"): ", "dist(", w.i, ",", j, ")=", distance, "-> fltr_point_i=", fltr_point_i, ", fltr_point_j=", fltr_point_j, ";", "no filtr. step that contains both              ", "  mod_dist(", w.i, ",", j, ")=", modified_distance)
-          }
-        }
       // Concatenate modified distance to current matrix line
       sb.WriteString(strconv.Itoa(modified_distance)) // write modified distance
       sb.WriteByte(',')                               // write separator
@@ -190,9 +181,7 @@ func main() {
 	var sub_fltr_input string
   var aux_file_name string
 
-  var save_aux bool
 	var ripser bool
-	var debug bool
 	var verbose bool
 	var help bool
 
@@ -202,9 +191,7 @@ func main() {
 	flag.StringVar(&threads, "threads", "", "number of threads")
 	flag.StringVar(&sub_fltr_input, "sub_fltr", "", "sub-filtration along which to compute 1d persistence.\n Format: [VR_0, i_0, j_0, k_0,...]-- ... --(VR_n, i_n, j_n, k_n,...)")
 
-  flag.BoolVar(&save_aux, "save_aux", false, "save auxiliary metric?")
 	flag.BoolVar(&ripser, "ripser", false, "run ripser?")
-	flag.BoolVar(&debug, "debug", false, "show messages for debugging purposes?")
 	flag.BoolVar(&verbose, "verbose", false, "show status messages?")
 	flag.BoolVar(&help, "help", false, "Get help message")
 	flag.Parse()
@@ -224,7 +211,9 @@ func main() {
 	}
 
 
+	if verbose {fmt.Println("---")}
 	// Read filtration file
+	if verbose {fmt.Println("Read point annotation file")}
 	fltr_file, err := os.Open(fltr_file_name)
 	if err != nil {
 		log.Fatalf("Failed to open file '%s': %v", fltr_file_name, err)
@@ -248,6 +237,7 @@ func main() {
 
 
   // Read sub filtration from command line OR create default sub filtration
+	if verbose {fmt.Println("Read subfiltration")}
 	var sub_fltr [][]float64
 	if sub_fltr_input != "" {
 		// Parse sub filtration from command line input
@@ -283,18 +273,14 @@ func main() {
 	}
 
 
-  // print status messages to stdout
-  if (verbose == true) || (debug == true) {
-		fmt.Println("sub filtration", sub_fltr)
-    // fmt.Println("filtration list", fltr_list)
-		// fmt.Println("ripser threshold =", ripser_threshold)
-	}
+  if verbose {fmt.Println(sub_fltr)}
 
 
   //// Prepare input and communication channels
+	if verbose {fmt.Println("Building auxiliary Distance Matrix")}
 
   // Concatenate background information from above for workers
-  b := args{sub_fltr, fltr_list, debug}
+  b := args{sub_fltr, fltr_list}
 
   // Open distance matrix file
   in_file, err := os.Open(dist_file_name)
@@ -322,7 +308,6 @@ func main() {
 	}
 
   // Initialize buffered writer
-
   var out_writer *bufio.Writer
   aux_file, err := os.Create(aux_file_name)
   			if err != nil {
@@ -339,27 +324,22 @@ func main() {
   //// Parallel execution
 
 	// Start reader
-  if debug {fmt.Println("start reader..")}
 	go reader(in_file, toWorker)
-	if debug {fmt.Println(".. reader started")}
 
 	// Start workers
-	if debug {fmt.Println("start workers ..")}
 	for i := 0; i < numThreads; i++ {
 		go worker(toWorker[i], toWriter[i], b)
 	}
-	if debug {fmt.Println("..workers started")}
 
   // Start writer
-	if debug {fmt.Println("start writer..")}
 	writer(toWriter, out_writer)
-	if debug {fmt.Println(".. writer started")}
-
 
 
 	//// Run ripser on auxiliary distance matrix and translate result
   var ripser_output []byte
 	if ripser {
+		if verbose {fmt.Println("---")}
+		if verbose {fmt.Println("Run Ripser")}
     ripser_cmd := exec.Command("ripser", "--format", "lower-distance", aux_file_name)
     var err error
 		ripser_output, err = ripser_cmd.CombinedOutput()
@@ -367,12 +347,11 @@ func main() {
 			log.Fatalf("Failed to run command: %v\nCommand output: %s", err, string(ripser_output))
 		}
 	}
-  if !save_aux {
-    err := os.Remove(aux_file_name)
-    if err != nil {
-			log.Fatalf("Failed to delete auxiliary distance matrix: %v", err)
-		}
-  }
+
+  err = os.Remove(aux_file_name)
+  if err != nil {
+		log.Fatalf("Failed to delete auxiliary distance matrix: %v", err)
+	}
 
   // Translate ripser output of barcodes into barcodes on subfiltration
   print_flag := true
