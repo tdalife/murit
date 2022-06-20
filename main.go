@@ -16,6 +16,9 @@ import (
   "time"
 )
 
+
+// define two kinds of structs for handling input of parallelized workers
+
 type workload struct {
   i    int
   text string
@@ -27,7 +30,7 @@ type args struct{
 }
 
 
-// lexicographical comparisons of lists (of integers)
+// implementation of standard partial order on R^n
 func leq(poset_element1 []float64, poset_element2 []float64) bool {
 	var L int
 	if len(poset_element1) <= len(poset_element2) {
@@ -35,14 +38,15 @@ func leq(poset_element1 []float64, poset_element2 []float64) bool {
 	} else {
 		L = len(poset_element2)
 	}
-	for a:= 0; a<L; a++ {
-		if (poset_element1[a] > poset_element2[a]) {
+	for i:= 0; i<L; i++ {
+		if (poset_element1[i] > poset_element2[i]) {
 			return false
 		}
 	}
 	return true
 }
 
+// implementation of equality check on R^n
 func equal(poset_element1 []float64, poset_element2 []float64) bool {
 	var L int
 	if len(poset_element1) <= len(poset_element2) {
@@ -50,8 +54,8 @@ func equal(poset_element1 []float64, poset_element2 []float64) bool {
 	} else {
 		L = len(poset_element2)
 	}
-	for a:= 0; a<L; a++ {
-		if (poset_element1[a] != poset_element2[a]) {
+	for i:= 0; i<L; i++ {
+		if (poset_element1[i] != poset_element2[i]) {
 			return false
 		}
 	}
@@ -59,6 +63,8 @@ func equal(poset_element1 []float64, poset_element2 []float64) bool {
 }
 
 
+
+//
 // Reader function
 func reader(in *os.File, out []chan workload) {
   var in_scanner *bufio.Scanner
@@ -116,7 +122,7 @@ func worker(in chan workload, out chan string, b args) {
       fltr_point_j := append([]float64{distance}, b.fltr_list[j]...)
       for k, x := range b.sub_fltr {
         if leq(fltr_point_i, x) && leq(fltr_point_j, x) {
-          modified_distance = k
+          modified_distance = k+1 // adjusting from zero- to one-indexing to get a well-behaved semi distance matrix
           break
         }
       }
@@ -174,31 +180,96 @@ func hash(s string) string {
 
 
 
+
+
+
+
+
+//-------------------------------------------------------------------------
+//----------------         main        ------------------------------------
+//-------------------------------------------------------------------------
 func main() {
 	var dist_file_name string
 	var fltr_file_name string
-	var threads string
 	var sub_fltr_input string
-  var aux_file_name string
+	var threads string
 
-	var ripser bool
 	var verbose bool
 	var help bool
 
-	// Parse command line options
-	flag.StringVar(&dist_file_name, "dist_file", "", "distance file name")
-	flag.StringVar(&fltr_file_name, "fltr_file", "", "filtration file name. Each row gives filtration value of corresponding data point.\n Format i,j,k,... (interpreted with lexicraphical order)")
-	flag.StringVar(&threads, "threads", "", "number of threads")
-	flag.StringVar(&sub_fltr_input, "sub_fltr", "", "sub-filtration along which to compute 1d persistence.\n Format: [VR_0, i_0, j_0, k_0,...]-- ... --(VR_n, i_n, j_n, k_n,...)")
+	var ripser bool
+	var ripser_dim string
+	var ripser_threshold string
+	var ripser_modulus string
+	var ripser_ratio string
 
-	flag.BoolVar(&ripser, "ripser", false, "run ripser?")
-	flag.BoolVar(&verbose, "verbose", false, "show status messages?")
-	flag.BoolVar(&help, "help", false, "Get help message")
+	var aux_file_name string
+	var aux_description string
+
+
+	//
+	// Command Line Options
+	//
+
+	flag.StringVar(&dist_file_name, "dist", "", "file name of lower-triangular distance matrix.")
+
+	aux_description=`file name of pointwise filtration annotation.
+
+  file content:
+    on row 'i' a comma-separated list of minimal filtration values for data point 'i'.
+    standard partial order on R^n.
+  example:
+    (0,0,1)	// minimum of point 1
+    (1,1,1)	// minimum of point 2
+    ...
+`
+	flag.StringVar(&fltr_file_name, "pt_fltr", "", aux_description)
+
+	aux_description=`command line input of sub-filtration along which to compute 1d persistence.
+
+  example:
+    (VR_0, i_0, j_0, k_0,...)-- ... --(VR_n, i_n, j_n, k_n,...)
+`
+	flag.StringVar(&sub_fltr_input, "sub_fltr", "", aux_description)
+
+	flag.StringVar(&threads, "threads", "", "number of threads (default: runtime.NumCPU())")
+	flag.BoolVar(&verbose, "verbose", false, "Show status messages (default: false)")
+	flag.BoolVar(&help, "help", false, "Show this help message")
+	flag.BoolVar(&ripser, "ripser", false, "run ripser on auxiliary distance matrix (default: false)\n  Requires local ripser installation in PATH ")
+	flag.StringVar(&ripser_dim, "dim", "1", "compute persistent homology up to dimension k (default: 1).")
+	flag.StringVar(&ripser_threshold, "threshold", "", "compute persistent homology up to threshold t (in auxiliary distance matrix, default: enclosing radius).")
+	flag.StringVar(&ripser_modulus, "modulus", "", "compute homology with coefficients in the prime field Z/pZ (default: 2).")
+	flag.StringVar(&ripser_ratio, "ratio", "", "only show persistence pairs with death/birth ratio > r")
+
+
+	// define custom flag.Usage() to be printed upon -help call.
+	flag.Usage = func() {
+			flagSet := flag.CommandLine
+			aux_description = `Usage:
+murit --dist <filename> --pt_fltr <filename> --sub_fltr (VR_0, i_0, j_0, ...)-- ... --(VR_n, i_n, j_n, ...) [--options]
+`
+			fmt.Printf(aux_description)
+			fmt.Printf("\nCommand Line Arguments\n")
+			arguments := []string{"dist", "pt_fltr", "sub_fltr", "threads", "verbose", "help", "ripser"}
+			for _, name := range arguments {
+					flag := flagSet.Lookup(name)
+					fmt.Printf("-%s\n", flag.Name)
+					fmt.Printf("  %s\n", flag.Usage)
+			}
+			ripser_arguments := []string{"dim", "threshold", "modulus", "ratio"}
+			for _, name := range ripser_arguments {
+					flag := flagSet.Lookup(name)
+					fmt.Printf("	-%s\n", flag.Name)
+					fmt.Printf("	  %s\n", flag.Usage)
+			}
+	}
+
+	// Parse
 	flag.Parse()
 
 	// print help message
 	if help {
-		flag.PrintDefaults()
+		flag.Usage()
 		return
 	}
 
@@ -211,9 +282,8 @@ func main() {
 	}
 
 
-	if verbose {fmt.Println("---")}
 	// Read filtration file
-	if verbose {fmt.Println("Read point annotation file")}
+	if verbose {fmt.Println("Read pointwise annotation file")}
 	fltr_file, err := os.Open(fltr_file_name)
 	if err != nil {
 		log.Fatalf("Failed to open file '%s': %v", fltr_file_name, err)
@@ -224,6 +294,7 @@ func main() {
 	for fltr_scanner.Scan() {
 		var row []float64
 			for _, v := range strings.Split(fltr_scanner.Text(),",") {
+				v = strings.Trim(v, " ()")
 				s, err := strconv.ParseFloat(v,64)
 				if err != nil {
 					log.Fatalf("Filtration parse error: %v", err)
@@ -237,10 +308,10 @@ func main() {
 
 
   // Read sub filtration from command line OR create default sub filtration
-	if verbose {fmt.Println("Read subfiltration")}
 	var sub_fltr [][]float64
 	if sub_fltr_input != "" {
 		// Parse sub filtration from command line input
+		if verbose {fmt.Println("Read subfiltration")}
 		for _, p := range strings.Split(sub_fltr_input,"--"){
 			var point []float64
 			for _, q := range strings.Split(strings.Trim(p, " []"),","){
@@ -258,10 +329,9 @@ func main() {
 				log.Fatalf("Invalid sub-filtration: sub_fltr[%v] = %v !<= %v = sub_fltr[%v]", i, sub_fltr[i], sub_fltr[j], j)
 			}
 		}
-    // Set filename of auxiliary distance matrix in dependence of sub_fltr
-    aux_file_name = filepath.Dir(dist_file_name)+"/"+hash(sub_fltr_input)+".aux"
 	} else {
 		// Extract a valid sub filtration from the filtration file (traverse through list once and successively add larger elements)
+		if verbose {fmt.Println("Build subfiltration")}
 		sub_fltr = append(sub_fltr, append([]float64{0}, fltr_list[0]...))
 		for _, x := range fltr_list {
 			x = append([]float64{1}, x...)
@@ -269,15 +339,20 @@ func main() {
 				sub_fltr = append(sub_fltr, x)
 			}
 		}
-    aux_file_name = filepath.Dir(dist_file_name)+"/"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10)+".aux"
 	}
 
 
   if verbose {fmt.Println(sub_fltr)}
 
+	//
+  // Prepare Input and Communication Channels
+	//
 
-  //// Prepare input and communication channels
-	if verbose {fmt.Println("Building auxiliary Distance Matrix")}
+	if verbose {fmt.Println("Build auxiliary Distance Matrix")}
+	// For future development:
+	// Set filename of auxiliary distance matrix in dependence of sub_fltr
+	// aux_file_name = filepath.Dir(dist_file_name)+"/"+hash(sub_fltr_input)+".aux"
+	aux_file_name = filepath.Dir(dist_file_name)+"/"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10)+".aux"
 
   // Concatenate background information from above for workers
   b := args{sub_fltr, fltr_list}
@@ -287,7 +362,7 @@ func main() {
   if err != nil {
     log.Fatalf("Failed to open file '%s': %v", dist_file_name, err)
   }
-  defer in_file.Close()   // defer closing of in_file (MB: defers until main is closed, I think)
+  defer in_file.Close()   // defer closing of in_file until main() is closed
 
   // Initialize communication channels
   var numThreads int
@@ -321,7 +396,9 @@ func main() {
   }
 
 
-  //// Parallel execution
+	//
+  // Parallel Execution
+	//
 
 	// Start reader
 	go reader(in_file, toWorker)
@@ -335,17 +412,40 @@ func main() {
 	writer(toWriter, out_writer)
 
 
-	//// Run ripser on auxiliary distance matrix and translate result
+
+	//
+	// Calculate Persistent Homology with Ripser
+	//
+
+	// Run ripser on auxiliary distance matrix
   var ripser_output []byte
 	if ripser {
 		if verbose {fmt.Println("---")}
 		if verbose {fmt.Println("Run Ripser")}
-    ripser_cmd := exec.Command("ripser", "--format", "lower-distance", aux_file_name)
+
+		ripser_arguments := []string{"--format", "lower-distance"}
+		if ripser_dim != ""{
+			ripser_arguments = append(ripser_arguments, "--dim", ripser_dim)
+		}
+		if ripser_threshold != ""{
+			ripser_arguments = append(ripser_arguments, "--threshold", ripser_threshold)
+		}
+		if ripser_modulus != ""{
+			ripser_arguments = append(ripser_arguments, "--modulus", ripser_modulus)
+		}
+		if ripser_ratio != ""{
+			ripser_arguments = append(ripser_arguments, "--ratio", ripser_ratio)
+		}
+		ripser_arguments = append(ripser_arguments, aux_file_name)
+
+    ripser_cmd := exec.Command("ripser", ripser_arguments...)
+
     var err error
 		ripser_output, err = ripser_cmd.CombinedOutput()
 		if err != nil {
 			log.Fatalf("Failed to run command: %v\nCommand output: %s", err, string(ripser_output))
 		}
+
 	}
 
   err = os.Remove(aux_file_name)
@@ -374,12 +474,14 @@ func main() {
         if err != nil {
     			log.Fatalf("parsing error: %v", err)
     		}
+				//adjust from one- to zero-indexing
         birth = birth-1
 
         death, err := strconv.Atoi(x[1])
         if err != nil {
     			log.Fatalf("parsing error: %v", err)
     		}
+				//adjust from one- to zero-indexing
         death = death-1
 
         fmt.Println(" [", sub_fltr[birth], ",", sub_fltr[death], "):")
