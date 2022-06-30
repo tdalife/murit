@@ -1,5 +1,4 @@
 # MuRiT
-Copyright © 2022 Michael Bleher
 
 ## Description
 `MuRiT` is a standalone program that provides Vietoris-Rips transformations for multifiltered flag complexes.
@@ -36,8 +35,7 @@ go run main.go [--options]
 For help in building your own executables, [see here](https://go.dev/doc/tutorial/compile-install).
 
 ### Contribute
-We envision a broad interaction with the research community.
-If you have a special use-case for `MuRiT` that isn't covered by the current implementation or have an idea for additional features, get in touch or submit your pull requests.
+If you have a special use-case for `MuRiT` that isn't covered by the current implementation or have an idea for additional features, feel free to get in touch or submit your pull requests.
 
 
 ## Using `MuRiT`
@@ -45,7 +43,7 @@ If you have a special use-case for `MuRiT` that isn't covered by the current imp
 
 - a comma-separated lower-triangular distance matrix,
 - a pointwise annotation file,
-- and a one-dimensional subfiltration $(VR_0, i_0, j_0, ...)-- ... --(VR_n, i_n, j_n, ...)$.
+- and a one-dimensional subfiltration $[VR_0, i_0, j_0, ...]-- ... --[VR_n, i_n, j_n, ...]$.
 
 It's output is
 
@@ -55,10 +53,10 @@ It's output is
 A call to `MuRiT` looks as follows
 
 ```
-murit --dist [filename] --pt_fltr [filename] --sub_fltr (VR_0, i_0, j_0, ...)-- ... --(VR_n, i_n, j_n, ...) [--options]
+murit --dist <filename> --minima <filename> --path [VR_0, i_0, j_0, ...]-- ... --[VR_n, i_n, j_n, ...] [--options]
 ```
 
-*Note: MuRiT relies on the standard partial order on $\mathbb{R}^n$ for some $n$. Make sure you have translated*
+*Note: MuRiT uses the standard partial order on $\mathbb{R}^n$ for some $n$.*
 
 ### List of Command Line Arguments
 
@@ -67,11 +65,11 @@ murit --dist [filename] --pt_fltr [filename] --sub_fltr (VR_0, i_0, j_0, ...)-- 
 file name of lower-triangular distance matrix.
 
 
-##### `--pt_fltr`
+##### `--minima`
 
-file name of pointwise filtration annotation.
+file name of pointwise minima annotation.
 
-  file content: on row 'i' a comma-separated list of minimal filtration values for data point 'i'.
+  file content: on row `i` a comma-separated list of minimal filtration values for data point $x_i$.
   example file:
 
 
@@ -79,12 +77,12 @@ file name of pointwise filtration annotation.
     (1,1,1)     // minimum of point 2
     ...
 
-##### `--sub_fltr`
+##### `--path`
 
-  command line input of sub-filtration along which to compute 1d persistence.
+  command line input of the path along which to compute 1d persistence.
 
   example:
-    (VR_0, i_0, j_0, k_0,...)-- ... --(VR_n, i_n, j_n, k_n,...)
+    `[VR_0, i_0, j_0, k_0,...]-- ... --[VR_n, i_n, j_n, k_n,...]`
 
 ##### `--threads`
 number of threads (default: runtime.NumCPU())
@@ -94,9 +92,10 @@ Show status messages (default: false)
 Show help message
 ##### `--ripser`
 run ripser on auxiliary distance matrix (default: false).
-Requires a local ripser installation in PATH
 
-Further Ripser options
+Requires a local ripser installation in PATH.
+
+Ripser options (handed directly to ripser)
 - `--dim` compute persistent homology up to dimension k (default: 1).
 - `--threshold` compute persistent homology up to threshold t (in auxiliary distance matrix, default: enclosing radius).
 - `--modulus` compute homology with coefficients in the prime field Z/pZ (default: 2).
@@ -110,22 +109,26 @@ _The distance matrix and filtration file for the following example is provided i
 Consider the metric space of a diamond consisting of four points with side length $1$ and diagonal length $2$.
 Assume that for each point there is additional information about time $t$ at which the point entered the data set (say in seconds), and some threshold height $h$ above which it could be observed.
 
-The following list of filtration tuples $(t, h)$ for each of the four points is provided in `examples/diamonds.fltr`.
+The following list of filtration tuples $(t, h)$ for each of the four points is provided in `examples/diamond.minima`.
 ```
 (0,0)
 (1.2,0)
 (1.6,1)
-(3.1,1)
+(2,1)
+
 ```
 This means that the first point was observed from the beginning and already at lowest height, while the second point only appears after 1.2 seconds and also at lowest height, et cetera.
 
 Running `MuRiT` on this data produces the distance matrix of a Vietoris-Rips transformation
 ```
-$ murit --dist examples/diamond.dist --pt_fltr examples/diamond.fltr --verbose
-Read pointwise annotation file
-Build subfiltration
-[[0 0 0] [1 0 0] [1 1.2 0] [1 1.6 1] [1 2 1]]
-Build auxiliary Distance Matrix
+$ murit --dist examples/diamond.dist --minima examples/diamond.minima --verbose
+Pointwise minima
+[[[0 0]] [[1.2 0]] [[1.6 1]] [[2 1]]]
+
+Path
+[0,0,0]--[1,0,0]--[1,1.2,0]--[1,1.6,1]--[1,2,1]
+
+Auxiliary Distance Matrix
 3
 4,5
 5,5,5
@@ -134,31 +137,34 @@ _Note: If no subfiltration is specified, `MuRiT` will build some auxiliary initi
 
 If we add the `--ripser` flag, the distance matrix is automatically handed over to `Ripser` to calculate persistent homology along the one-dimensional subfiltration.
 ```
-$ murit --dist examples/diamond.dist --pt_fltr examples/diamond.fltr --verbose --ripser
-Read pointwise annotation file
-Build subfiltration
-[[0 0 0] [1 0 0] [1 1.2 0] [1 1.6 1] [1 2 1]]
-Build auxiliary Distance Matrix
----
-Run Ripser
+$ murit --dist examples/diamond.dist --minima examples/diamond.minima --verbose --ripser
+Pointwise minima
+[[[0 0]] [[1.2 0]] [[1.6 1]] [[2 1]]]
+
+Path
+[0,0,0]--[1,0,0]--[1,1.2,0]--[1,1.6,1]--[1,2,1]
+
+Ripser
 value range: [3,5]
 distance matrix with 4 points, using threshold at enclosing radius 5
 persistent homology intervals in dim 1:
-
 ```
 Note that we do not find non-trivial homology in this example.
 This makes sense, because the last point enters the filtration only at the last step in the one-dimensional subfiltration.
 Only from that point on we might expect to see the cycle around the diamond.
 
-Adding two further filtration steps $[2,2,1]--[2.1,2,1]$ at higher Vietoris-Rips parameters to the automatically generated subfiltration, we get:
+Adding two further filtration steps `[2,2,1]--[2.1,2,1]` at higher Vietoris-Rips parameters to the automatically generated subfiltration, we get:
 ```
-$ murit --dist examples/diamond.dist --pt_fltr examples/diamond.fltr --verbose --ripser --sub_fltr [0,0,0]--[1,0,0]--[1,1,0]--[1,2,0]--[1,2,1]--[2,2,1]--[2.1,2,1]
-Read pointwise annotation file
-Read subfiltration
-[[0 0 0] [1 0 0] [1 1 0] [1 2 0] [1 2 1] [2 2 1] [2.1 2 1]]
-Build auxiliary Distance Matrix
----
-Run Ripser
+$ murit --dist examples/diamond.dist --minima examples/diamond.minima --verbose --ripser
+    --path [0,0,0]--[1,0,0]--[1,1,0]--[1,2,0]--[1,2,1]--[2,2,1]--[2.1,2,1]
+
+Pointwise minima
+[[[0 0]] [[1.2 0]] [[1.6 1]] [[2 1]]]
+
+Path
+[0,0,0]--[1,0,0]--[1,1,0]--[1,2,0]--[1,2,1]--[2,2,1]--[2.1,2,1]
+
+Ripser
 value range: [4,6]
 distance matrix with 4 points, using threshold at enclosing radius 6
 persistent homology intervals in dim 1:
@@ -166,11 +172,11 @@ persistent homology intervals in dim 1:
 {[0,2] (5), [1,3] (5), [2,3] (5), [0,1] (4)}
 {[0,2] (5), [1,3] (5), [2,3] (5), [0,1] (4)}
 ```
-Indeed we find that there is a homology class in dimension one, which is born at filtration value $[1,2,1]$, i.e. once the fourth point has been observed.
-The homology class dies at filtration value $[2,2,1]$, which is when the diagonals are added to the Vietoris-Rips complex.
+Indeed we find that there is a homology class in dimension one, which is born at filtration value `[1,2,1]`, i.e. once the fourth point has been observed.
+The homology class dies at filtration value `[2,2,1]`, which is when the diagonals are added to the Vietoris-Rips complex.
 
 
-_Note: By using the `--ripser` flag, the result is automatically converted back to the subfiltration values._
+_Note: By using the `--ripser` flag, the result is automatically converted back to filtration values._
 
 
 ## Citing

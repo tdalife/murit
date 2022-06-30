@@ -25,8 +25,8 @@ type workload struct {
 }
 
 type args struct{
-  sub_fltr [][]float64
-  fltr_list [][]float64
+  path [][]float64
+  minima_list [][][]float64
 }
 
 
@@ -62,6 +62,21 @@ func equal(poset_element1 []float64, poset_element2 []float64) bool {
 	return true
 }
 
+
+// find index for which a data point first enters a totally ordered subfiltration from list of filtration minima
+func get_index_of_entry(minima [][]float64, path [][]float64) int{
+	// for each filtration step along the subfiltration, check if one of the minima of the data point lies below.
+	// If so, we found the point of entry
+	for k, x := range path {
+		for _, minimum := range minima{
+			if leq(minimum, x){
+				return k+1 // shift from zero- to one-indexing!
+			}
+		}
+	// if the point is not contained in the path at all, set index to (maximal filtration value + 1) <- equivalent to infty
+	}
+	return len(path) // shift from zero- to one-indexing!
+}
 
 
 //
@@ -115,17 +130,28 @@ func worker(in chan workload, out chan string, b args) {
       if err != nil {
         log.Fatalf("Distance conversion error: %v", err)
       }
-      // Goal: Determine modified distance for pair of datapoints (x_i,x_j), see article.
-      // find sub-filtration point in which the given edge is present and set distance to that value.
-      modified_distance := len(b.sub_fltr)
-      fltr_point_i := append([]float64{distance}, b.fltr_list[w.i]...)
-      fltr_point_j := append([]float64{distance}, b.fltr_list[j]...)
-      for k, x := range b.sub_fltr {
-        if leq(fltr_point_i, x) && leq(fltr_point_j, x) {
-          modified_distance = k+1 // adjusting from zero- to one-indexing to get a well-behaved semi distance matrix
-          break
-        }
-      }
+			// Append distance of x_i and x_j to the start of each filtration value of the given minimum
+			var minima_i [][]float64
+			for _, minimum := range b.minima_list[w.i]{
+				minima_i = append(minima_i, append([]float64{distance}, minimum...))
+			}
+			var minima_j [][]float64
+			for _, minimum := range b.minima_list[j]{
+				minima_j = append(minima_j, append([]float64{distance}, minimum...))
+			}
+      // Determine modified distance for pair of datapoints (x_i,x_j).
+      // modified distance is the index of entry for the edge (x_i,x_j)
+			// the edge is present as soon as both x_i and x_j have entered
+			var modified_distance int
+			index_of_entry_i := get_index_of_entry(minima_i, b.path)
+			index_of_entry_j := get_index_of_entry(minima_j, b.path)
+			// use maximum of the two
+			if index_of_entry_i >= index_of_entry_j {
+				modified_distance = index_of_entry_i
+			} else {
+				modified_distance = index_of_entry_j
+			}
+			// fmt.Println(minima_i, index_of_entry_i, "-", minima_j, index_of_entry_j, "-", modified_distance)
       // Concatenate modified distance to current matrix line
       sb.WriteString(strconv.Itoa(modified_distance)) // write modified distance
       sb.WriteByte(',')                               // write separator
@@ -190,8 +216,8 @@ func hash(s string) string {
 //-------------------------------------------------------------------------
 func main() {
 	var dist_file_name string
-	var fltr_file_name string
-	var sub_fltr_input string
+	var minima_file_name string
+	var path_input string
 	var threads string
 
 	var verbose bool
@@ -213,24 +239,24 @@ func main() {
 
 	flag.StringVar(&dist_file_name, "dist", "", "file name of lower-triangular distance matrix.")
 
-	aux_description=`file name of pointwise filtration annotation.
+	aux_description=`file name of pointwise minima annotation.
 
   file content:
     on row 'i' a comma-separated list of minimal filtration values for data point 'i'.
     standard partial order on R^n.
   example:
-    (0,0,1)	// minimum of point 1
-    (1,1,1)	// minimum of point 2
+    (0,0,1), (1,0,0)	// minima of point 1
+    (1,1,1)	// minima of point 2
     ...
 `
-	flag.StringVar(&fltr_file_name, "pt_fltr", "", aux_description)
+	flag.StringVar(&minima_file_name, "minima", "", aux_description)
 
 	aux_description=`command line input of sub-filtration along which to compute 1d persistence.
 
   example:
-    (VR_0, i_0, j_0, k_0,...)-- ... --(VR_n, i_n, j_n, k_n,...)
+    [VR_0, i_0, j_0, k_0,...]-- ... --[VR_n, i_n, j_n, k_n,...]
 `
-	flag.StringVar(&sub_fltr_input, "sub_fltr", "", aux_description)
+	flag.StringVar(&path_input, "path", "", aux_description)
 
 	flag.StringVar(&threads, "threads", "", "number of threads (default: runtime.NumCPU())")
 	flag.BoolVar(&verbose, "verbose", false, "Show status messages (default: false)")
@@ -246,11 +272,11 @@ func main() {
 	flag.Usage = func() {
 			flagSet := flag.CommandLine
 			aux_description = `Usage:
-murit --dist <filename> --pt_fltr <filename> --sub_fltr (VR_0, i_0, j_0, ...)-- ... --(VR_n, i_n, j_n, ...) [--options]
+murit --dist <filename> --minima <filename> --path (VR_0, i_0, j_0, ...)-- ... --(VR_n, i_n, j_n, ...) [--options]
 `
 			fmt.Printf(aux_description)
 			fmt.Printf("\nCommand Line Arguments\n")
-			arguments := []string{"dist", "pt_fltr", "sub_fltr", "threads", "verbose", "help", "ripser"}
+			arguments := []string{"dist", "minima", "path", "threads", "verbose", "help", "ripser"}
 			for _, name := range arguments {
 					flag := flagSet.Lookup(name)
 					fmt.Printf("-%s\n", flag.Name)
@@ -277,42 +303,49 @@ murit --dist <filename> --pt_fltr <filename> --sub_fltr (VR_0, i_0, j_0, ...)-- 
 	if dist_file_name == "" {
 		log.Fatal("dist file name required (--dist_file)")
 	}
-	if fltr_file_name == "" {
-		log.Fatal("filtration file name required (--fltr_file)")
+	if minima_file_name == "" {
+		log.Fatal("filtration file name required (--minima_file)")
 	}
 
 
 	// Read filtration file
-	if verbose {fmt.Println("Read pointwise annotation file")}
-	fltr_file, err := os.Open(fltr_file_name)
+	if verbose {fmt.Println("Pointwise minima")}
+	minima_file, err := os.Open(minima_file_name)
 	if err != nil {
-		log.Fatalf("Failed to open file '%s': %v", fltr_file_name, err)
+		log.Fatalf("Failed to open file '%s': %v", minima_file_name, err)
 	}
 
-	var fltr_list [][]float64
-	fltr_scanner := bufio.NewScanner(fltr_file)
-	for fltr_scanner.Scan() {
-		var row []float64
-			for _, v := range strings.Split(fltr_scanner.Text(),",") {
-				v = strings.Trim(v, " ()")
-				s, err := strconv.ParseFloat(v,64)
+	var minima_list [][][]float64
+	minima_scanner := bufio.NewScanner(minima_file)
+	for minima_scanner.Scan() {
+		var minima [][]float64
+		// assume each line is a comma-separated list of minima in the format (a_1, a_2, ...), (b_1, b_2, ...)
+		line := minima_scanner.Text()
+		// split lines into separate minima (a_1, a_2, ...)
+		for _, x := range strings.Split(line, "),("){
+			// convert the separated minimum into a list of floats value, by value
+			var minimum []float64
+			for _, value_str := range strings.Split(strings.Trim(x, " ()"), ",") {
+				value_float, err := strconv.ParseFloat(value_str, 64)
 				if err != nil {
 					log.Fatalf("Filtration parse error: %v", err)
 				}
-				row = append(row, s)
+				minimum = append(minimum, value_float)
+			}
+			minima = append(minima, minimum)
 		}
-		fltr_list = append(fltr_list, row)
+		minima_list = append(minima_list, minima)
 	}
+	if verbose {fmt.Println(minima_list)}
 	// Close filtration file
-	fltr_file.Close()
+	minima_file.Close()
 
 
   // Read sub filtration from command line OR create default sub filtration
-	var sub_fltr [][]float64
-	if sub_fltr_input != "" {
+	var path [][]float64
+	if path_input != "" {
 		// Parse sub filtration from command line input
-		if verbose {fmt.Println("Read subfiltration")}
-		for _, p := range strings.Split(sub_fltr_input,"--"){
+		for _, p := range strings.Split(path_input,"--"){
 			var point []float64
 			for _, q := range strings.Split(strings.Trim(p, " []"),","){
 				s, err := strconv.ParseFloat(q,64)
@@ -321,41 +354,51 @@ murit --dist <filename> --pt_fltr <filename> --sub_fltr (VR_0, i_0, j_0, ...)-- 
 				}
 				point = append(point, s)
 			}
-			sub_fltr = append(sub_fltr, point)
+			path = append(path, point)
 		}
 		// Check if sub filtration is valid (i.e. in lexicographical order)
-		for i, j := 0, 1; j < len(sub_fltr); i, j = i+1, j+1 {
-			if !(leq(sub_fltr[i], sub_fltr[j])) {
-				log.Fatalf("Invalid sub-filtration: sub_fltr[%v] = %v !<= %v = sub_fltr[%v]", i, sub_fltr[i], sub_fltr[j], j)
+		for i, j := 0, 1; j < len(path); i, j = i+1, j+1 {
+			if !(leq(path[i], path[j])) {
+				log.Fatalf("Invalid Path: path[%v] = %v !<= %v = path[%v]", i, path[i], path[j], j)
 			}
 		}
 	} else {
 		// Extract a valid sub filtration from the filtration file (traverse through list once and successively add larger elements)
-		if verbose {fmt.Println("Build subfiltration")}
-		sub_fltr = append(sub_fltr, append([]float64{0}, fltr_list[0]...))
-		for _, x := range fltr_list {
-			x = append([]float64{1}, x...)
-			if leq(sub_fltr[len(sub_fltr)-1], x) && !equal(sub_fltr[len(sub_fltr)-1], x) {
-				sub_fltr = append(sub_fltr, x)
+		path = append(path, append([]float64{0}, minima_list[0][0]...))
+		for _, x := range minima_list {
+			if leq(path[len(path)-1], append([]float64{1}, x[0]...)) && !equal(path[len(path)-1], append([]float64{1}, x[0]...)) {
+				path = append(path, append([]float64{1}, x[0]...))
 			}
 		}
 	}
+  if verbose {
+		fmt.Println("\nPath")
+		outer_sep := ""
+		for _, fltr_point := range path {
+			inner_sep := ""
+			fmt.Print(outer_sep,"[")
+			for _, value := range fltr_point{
+				fmt.Print(inner_sep, value)
+				inner_sep = ","
+			}
+			fmt.Print("]")
+			outer_sep = "--"
+		}
+		fmt.Print("\n")
+	}
 
-
-  if verbose {fmt.Println(sub_fltr)}
 
 	//
   // Prepare Input and Communication Channels
 	//
 
-	if verbose {fmt.Println("Build auxiliary Distance Matrix")}
-	// For future development:
-	// Set filename of auxiliary distance matrix in dependence of sub_fltr
-	// aux_file_name = filepath.Dir(dist_file_name)+"/"+hash(sub_fltr_input)+".aux"
+	// In future development:
+	// Set filename of auxiliary distance matrix in dependence of path
+	// aux_file_name = filepath.Dir(dist_file_name)+"/"+hash(path_input)+".aux"
 	aux_file_name = filepath.Dir(dist_file_name)+"/"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10)+".aux"
 
   // Concatenate background information from above for workers
-  b := args{sub_fltr, fltr_list}
+  b := args{path, minima_list}
 
   // Open distance matrix file
   in_file, err := os.Open(dist_file_name)
@@ -392,6 +435,7 @@ murit --dist <filename> --pt_fltr <filename> --sub_fltr (VR_0, i_0, j_0, ...)-- 
   if ripser {
     out_writer = bufio.NewWriter(aux_file)
   } else {
+		if verbose {fmt.Println("\nAuxiliary Distance Matrix")}
     out_writer = bufio.NewWriter(os.Stdout)
   }
 
@@ -420,8 +464,7 @@ murit --dist <filename> --pt_fltr <filename> --sub_fltr (VR_0, i_0, j_0, ...)-- 
 	// Run ripser on auxiliary distance matrix
   var ripser_output []byte
 	if ripser {
-		if verbose {fmt.Println("---")}
-		if verbose {fmt.Println("Run Ripser")}
+		if verbose {fmt.Println("\nRipser")}
 
 		ripser_arguments := []string{"--format", "lower-distance"}
 		if ripser_dim != ""{
@@ -474,17 +517,17 @@ murit --dist <filename> --pt_fltr <filename> --sub_fltr (VR_0, i_0, j_0, ...)-- 
         if err != nil {
     			log.Fatalf("parsing error: %v", err)
     		}
-				//adjust from one- to zero-indexing
+				// shift from one- to zero-indexing
         birth = birth-1
 
         death, err := strconv.Atoi(x[1])
         if err != nil {
     			log.Fatalf("parsing error: %v", err)
     		}
-				//adjust from one- to zero-indexing
+				// shift from one- to zero-indexing
         death = death-1
 
-        fmt.Println(" [", sub_fltr[birth], ",", sub_fltr[death], "):")
+        fmt.Println(" [", path[birth], ",", path[death], "):")
       } else {
         fmt.Println(line)
       }
