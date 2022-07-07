@@ -1,7 +1,7 @@
 # MuRiT
 
 ## Description
-`MuRiT` is a standalone program that provides Vietoris-Rips transformations for multifiltered flag complexes.
+`MuRiT` is a standalone program that provides Vietoris-Rips transformations for (multi)filtered metric spaces.
 
 It is build with the main goal of providing a `Ripser` add-on to calculate persistent homology of flag complexes along any totally ordered subfiltration of interest.
 Thus, `MuRiT` allows an easy exploration of multi-persistence properties for filtered metric spaces, e.g. timeseries data.
@@ -9,17 +9,17 @@ Thus, `MuRiT` allows an easy exploration of multi-persistence properties for fil
 
 The main features of `MuRiT` are
 
-- easy exploration of multi-persistence for filtered metric spaces
-- optimized for use as `Ripser` add-on (integrated call to local instance of `Ripser`)
+- easy exploration of multi-persistent features in filtered metric spaces
+- optimized for use as `Ripser` add-on (provides integrated call to local instance of `Ripser`)
 - fully parallelized and memory-efficient creation of the distance matrix of a Vietoris-Rips transformation
-- standalone exectubales for all major platforms
+- standalone executables for all major platforms
 - open source go code
 
 
 ## Setup
 ### Installation
 We provide executables for major platforms and architectures as releases, no installation is required for those.
-Just download the executable that fits your setup.
+Simply download the executable that fits your setup.
 
 If your platform and architecture is not provided, please see below.
 
@@ -42,12 +42,12 @@ If you have a special use-case for `MuRiT` that isn't covered by the current imp
 `MuRiT` expects as input
 
 - a comma-separated lower-triangular distance matrix,
-- a pointwise annotation file,
-- and a one-dimensional subfiltration $[VR_0, i_0, j_0, ...]-- ... --[VR_n, i_n, j_n, ...]$.
+- an annotation file that lists for each point its corresponding minimal filtration values in a given poset $P\subset \mathbb{R}^n$,
+- and a one-dimensional subfiltration / path $[VR_0, i_0, j_0, ...]-- ... --[VR_n, i_n, j_n, ...]$ of the Vietoris-Rips $\times P$ filtration.
 
 It's output is
 
-- either the distance matrix of a Vietoris-Rips Transformation of the flag complex
+- either the distance matrix of a Vietoris-Rips Transformation of the flag complex along
 - or the persistent homology of the flag complex along the chosen subfiltration.
 
 A call to `MuRiT` looks as follows
@@ -56,7 +56,7 @@ A call to `MuRiT` looks as follows
 murit --dist <filename> --minima <filename> --path [VR_0, i_0, j_0, ...]-- ... --[VR_n, i_n, j_n, ...] [--options]
 ```
 
-*Note: MuRiT uses the standard partial order on $\mathbb{R}^n$ for some $n$.*
+*Note: MuRiT uses the standard partial order on $\mathbb{R}^n$.*
 
 ### List of Command Line Arguments
 
@@ -153,7 +153,7 @@ Note that we do not find non-trivial homology in this example.
 This makes sense, because the last point enters the filtration only at the last step in the one-dimensional subfiltration.
 Only from that point on we might expect to see the cycle around the diamond.
 
-Adding two further filtration steps `[2,2,1]--[2.1,2,1]` at higher Vietoris-Rips parameters to the automatically generated subfiltration, we get:
+By adding two further filtration steps `[2,2,1]--[2.1,2,1]` at higher Vietoris-Rips parameters to the automatically generated subfiltration, we get:
 ```
 $ murit --dist examples/diamond.dist --minima examples/diamond.minima --verbose --ripser
     --path [0,0,0]--[1,0,0]--[1,1,0]--[1,2,0]--[1,2,1]--[2,2,1]--[2.1,2,1]
@@ -172,17 +172,13 @@ persistent homology intervals in dim 1:
 {[0,2] (5), [1,3] (5), [2,3] (5), [0,1] (4)}
 {[0,2] (5), [1,3] (5), [2,3] (5), [0,1] (4)}
 ```
-Indeed we find that there is a homology class in dimension one, which is born at filtration value `[1,2,1]`, i.e. once the fourth point has been observed.
+As expected, we find that there is a homology class in dimension one, which is born at filtration value `[1,2,1]`, i.e. once the fourth point has been observed.
 The homology class dies at filtration value `[2,2,1]`, which is when the diagonals are added to the Vietoris-Rips complex.
 
 
-_Note: By using the `--ripser` flag, the result is automatically converted back to filtration values._
+_Note: By using the `--ripser` flag, the result is automatically converted back to the filtration values._
 
 
 ## Citing
 
-Maximilian Neumann, Michael Bleher, Lukas Hahn, Samuel Braun,
-Holger Obermaier, Mehmet Soysal, René Caspart, and Andreas Ott (2022).
-"MuRiT: efficient computation of the multiparameter
-persistent homology of multifltered fag complexes via
-Vietoris-Rips transformations". *(to appear)*
+Maximilian Neumann, Michael Bleher, Lukas Hahn, Samuel Braun, Holger Obermaier, Mehmet Soysal, René Caspart, und Andreas Ott. „MuRiT: Efficient Computation of Pathwise Persistence Barcodes in Multi-Filtered Flag Complexes via Vietoris-Rips Transformations“. arXiv, 7. Juli 2022. https://doi.org/10.48550/arXiv.2207.03394.

@@ -1,3 +1,10 @@
+/*
+MuRiT: Efficient Computation of Pathwise Persistence Barcodes in Multi-Filtered Flag Complexes via Vietoris-Rips Transformations
+https://doi.org/10.48550/arXiv.2207.03394
+
+MIT License
+*/
+
 package main
 
 import (
@@ -75,7 +82,7 @@ func get_index_of_entry(minima [][]float64, path [][]float64) int{
 		}
 	// if the point is not contained in the path at all, set index to (maximal filtration value + 1) <- equivalent to infty
 	}
-	return len(path) // shift from zero- to one-indexing!
+	return len(path) // note that this already contains the shift from zero- to one-indexing!
 }
 
 
