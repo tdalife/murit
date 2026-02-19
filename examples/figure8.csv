@@ -1,0 +1,18 @@
+# N,k
+6,2
+# lower cycle (x-driven)
+2,4,"[[0.5,0]]"
+3,5,"[[0.5,0]]"
+4,5,"[[0.5,0]]"
+# upper cycle (y-driven)
+0,1,"[[0,0.5]]"
+0,2,"[[0,0.5]]"
+1,3,"[[0,0.5]]"
+# shared middle edge with two incomparable generators
+2,3,"[[0.5,0],[0,0.5]]"
+# upper cycle diagonals (kill upper cycle)
+0,3,"[[1,0.5]]"
+1,2,"[[1,0.5]]"
+# lower cycle diagonals (kill lower cycle)
+2,5,"[[0.5,1]]"
+3,4,"[[0.5,1]]"

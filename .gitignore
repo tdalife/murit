@@ -11,5 +11,16 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Local visualization scripts
+scripts/
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# Generated MuRiT outputs for multi-path runs
+*_path*.aux
+*_path*.ripser

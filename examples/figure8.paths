@@ -1,0 +1,6 @@
+# x-first then y: upper born first, then both, then upper dies, then lower dies
+[[0,0],[0.5,0],[0.5,0.5],[1,0.5],[1,1]]
+# y-first then x: lower born first, then both, then lower dies, then upper dies
+[[0,0],[0,0.5],[0.5,0.5],[0.5,1],[1,1]]
+# direct to both alive then both dead
+[[0,0],[0.5,0.5],[1,1]]

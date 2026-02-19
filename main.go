@@ -8,537 +8,853 @@ MIT License
 package main
 
 import (
+	"bufio"
+	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"bufio"
-	"strconv"
-	"runtime"
-	"math"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
-  "path/filepath"
-  "crypto/sha256"
-  "time"
+	"sync"
 )
 
-
-// define two kinds of structs for handling input of parallelized workers
-
-type workload struct {
-  i    int
-  text string
+type oneSimplexKey struct {
+	i int
+	j int
 }
 
-type args struct{
-  path [][]float64
-  minima_list [][][]float64
+type complexFiltrationData struct {
+	numVertices          int
+	paramDim             int
+	oneSimplexGenerators map[oneSimplexKey][][]float64
 }
 
+type rowResult struct {
+	row int
+	out string
+	err error
+}
 
-// implementation of standard partial order on R^n
-func leq(poset_element1 []float64, poset_element2 []float64) bool {
-	var L int
-	if len(poset_element1) <= len(poset_element2) {
-		L = len(poset_element1)
-	} else {
-		L = len(poset_element2)
+const ripserFlagDisabled = "__murit_ripser_disabled__"
+
+func leq(a []float64, b []float64) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	for i:= 0; i<L; i++ {
-		if (poset_element1[i] > poset_element2[i]) {
+	for i := range a {
+		if a[i] > b[i] {
 			return false
 		}
 	}
 	return true
 }
 
-// implementation of equality check on R^n
-func equal(poset_element1 []float64, poset_element2 []float64) bool {
-	var L int
-	if len(poset_element1) <= len(poset_element2) {
-		L = len(poset_element1)
-	} else {
-		L = len(poset_element2)
+func equalVector(a []float64, b []float64) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	for i:= 0; i<L; i++ {
-		if (poset_element1[i] != poset_element2[i]) {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
 	return true
 }
 
-
-// find index for which a data point first enters a totally ordered subfiltration from list of filtration minima
-func get_index_of_entry(minima [][]float64, path [][]float64) int{
-	// for each filtration step along the subfiltration, check if one of the minima of the data point lies below.
-	// If so, we found the point of entry
-	for k, x := range path {
-		for _, minimum := range minima{
-			if leq(minimum, x){
-				return k+1 // shift from zero- to one-indexing!
+func normalizeGenerators(generators [][]float64) [][]float64 {
+	unique := make([][]float64, 0, len(generators))
+	for _, g := range generators {
+		alreadySeen := false
+		for _, u := range unique {
+			if equalVector(g, u) {
+				alreadySeen = true
+				break
 			}
 		}
-	// if the point is not contained in the path at all, set index to (maximal filtration value + 1) <- equivalent to infty
+		if !alreadySeen {
+			copyVec := append([]float64(nil), g...)
+			unique = append(unique, copyVec)
+		}
 	}
-	return len(path) // note that this already contains the shift from zero- to one-indexing!
+
+	antichain := make([][]float64, 0, len(unique))
+	for i, g := range unique {
+		dominated := false
+		for j, h := range unique {
+			if i == j {
+				continue
+			}
+			if leq(h, g) {
+				dominated = true
+				break
+			}
+		}
+		if !dominated {
+			antichain = append(antichain, g)
+		}
+	}
+
+	// Canonical order for deterministic output/tests: lexicographic.
+	for i := 0; i < len(antichain); i++ {
+		for j := i + 1; j < len(antichain); j++ {
+			swap := false
+			for c := 0; c < len(antichain[i]) && c < len(antichain[j]); c++ {
+				if antichain[j][c] < antichain[i][c] {
+					swap = true
+					break
+				}
+				if antichain[j][c] > antichain[i][c] {
+					break
+				}
+			}
+			if swap {
+				antichain[i], antichain[j] = antichain[j], antichain[i]
+			}
+		}
+	}
+
+	return antichain
 }
 
-
-//
-// Reader function
-func reader(in *os.File, out []chan workload) {
-  var in_scanner *bufio.Scanner
-  in_scanner = bufio.NewScanner(in)
-
-  i := 1
-  channel_i := 0
-  // Increase buffer size, MaxScanTokenSize is too low!
-  // See: https://pkg.go.dev/bufio?utm_source=gopls#Scanner.Buffer
-  buffer := make([]byte, 64000)
-  in_scanner.Buffer(buffer, math.MaxInt)
-
-  for in_scanner.Scan() {
-    out[channel_i] <- workload{
-      i:    i,
-      text: in_scanner.Text(),
-    }
-    i++
-
-    // channel_i = (channel_i + 1) modulo number of channels
-    channel_i++
-    if channel_i == len(out) {
-      channel_i = 0
-    }
-  }
-
-  // close Channel
-  for _, o := range out {
-    close(o)
-  }
+func parseCSVLine(line string) ([]string, error) {
+	reader := csv.NewReader(strings.NewReader(line))
+	reader.TrimLeadingSpace = true
+	fields, err := reader.Read()
+	if err != nil {
+		return nil, err
+	}
+	for i := range fields {
+		fields[i] = strings.TrimSpace(fields[i])
+	}
+	return fields, nil
 }
 
+func parseComplexFiltrationFile(fileName string) (complexFiltrationData, error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return complexFiltrationData{}, fmt.Errorf("failed to open complex filtration file '%s': %w", fileName, err)
+	}
+	defer f.Close()
 
-// Worker function
-func worker(in chan workload, out chan string, b args) {
-  var sb strings.Builder
+	scanner := bufio.NewScanner(f)
+	buffer := make([]byte, 64*1024)
+	scanner.Buffer(buffer, bufio.MaxScanTokenSize*64)
 
-  for w := range in {
-    // clear string builder for new matrix line
-    sb.Reset()
+	lineNo := 0
+	headerSeen := false
+	filtration := complexFiltrationData{}
 
-    // Split line of distance matrix into the single distances at separator
-    splitLine := strings.Split(w.text, ",")
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
 
-    for j, token := range splitLine {
-      // convert distance string to int
-      distance, err := strconv.ParseFloat(token, 64)
-      if err != nil {
-        log.Fatalf("Distance conversion error: %v", err)
-      }
-			// Append distance of x_i and x_j to the start of each filtration value of the given minimum
-			var minima_i [][]float64
-			for _, minimum := range b.minima_list[w.i]{
-				minima_i = append(minima_i, append([]float64{distance}, minimum...))
+		fields, err := parseCSVLine(line)
+		if err != nil {
+			return complexFiltrationData{}, fmt.Errorf("invalid CSV row at line %d: %w", lineNo, err)
+		}
+		if !headerSeen {
+			if len(fields) != 2 {
+				return complexFiltrationData{}, fmt.Errorf("complex header must be 'N,k' at line %d", lineNo)
 			}
-			var minima_j [][]float64
-			for _, minimum := range b.minima_list[j]{
-				minima_j = append(minima_j, append([]float64{distance}, minimum...))
+			n, err := strconv.Atoi(fields[0])
+			if err != nil {
+				return complexFiltrationData{}, fmt.Errorf("invalid N in complex header at line %d: %w", lineNo, err)
 			}
-      // Determine modified distance for pair of datapoints (x_i,x_j).
-      // modified distance is the index of entry for the edge (x_i,x_j)
-			// the edge is present as soon as both x_i and x_j have entered
-			var modified_distance int
-			index_of_entry_i := get_index_of_entry(minima_i, b.path)
-			index_of_entry_j := get_index_of_entry(minima_j, b.path)
-			// use maximum of the two
-			if index_of_entry_i >= index_of_entry_j {
-				modified_distance = index_of_entry_i
+			k, err := strconv.Atoi(fields[1])
+			if err != nil {
+				return complexFiltrationData{}, fmt.Errorf("invalid k in complex header at line %d: %w", lineNo, err)
+			}
+			if n < 1 {
+				return complexFiltrationData{}, fmt.Errorf("invalid complex header at line %d: N must be >= 1", lineNo)
+			}
+			if k < 1 {
+				return complexFiltrationData{}, fmt.Errorf("invalid complex header at line %d: k must be >= 1", lineNo)
+			}
+			filtration = complexFiltrationData{
+				numVertices:          n,
+				paramDim:             k,
+				oneSimplexGenerators: make(map[oneSimplexKey][][]float64),
+			}
+			headerSeen = true
+			continue
+		}
+
+		if len(fields) != 3 {
+			return complexFiltrationData{}, fmt.Errorf("invalid 1-simplex row at line %d: expected 3 columns 'i,j,\"[[...]]\"', got %d", lineNo, len(fields))
+		}
+
+		i, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return complexFiltrationData{}, fmt.Errorf("invalid 1-simplex row at line %d: bad i index: %w", lineNo, err)
+		}
+		j, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return complexFiltrationData{}, fmt.Errorf("invalid 1-simplex row at line %d: bad j index: %w", lineNo, err)
+		}
+		if i < 0 || j < 0 || i >= filtration.numVertices || j >= filtration.numVertices {
+			return complexFiltrationData{}, fmt.Errorf("invalid 1-simplex row at line %d: indices must satisfy 0 <= i,j < N", lineNo)
+		}
+		if i >= j {
+			return complexFiltrationData{}, fmt.Errorf("invalid 1-simplex row at line %d: require i < j", lineNo)
+		}
+
+		key := oneSimplexKey{i: i, j: j}
+		if _, exists := filtration.oneSimplexGenerators[key]; exists {
+			return complexFiltrationData{}, fmt.Errorf("duplicate 1-simplex (%d,%d) at line %d", i, j, lineNo)
+		}
+
+		var generators [][]float64
+		if err := json.Unmarshal([]byte(fields[2]), &generators); err != nil {
+			return complexFiltrationData{}, fmt.Errorf("invalid generator list at line %d: %w", lineNo, err)
+		}
+		if len(generators) == 0 {
+			return complexFiltrationData{}, fmt.Errorf("invalid generator list at line %d: list must be non-empty", lineNo)
+		}
+		for gIdx, g := range generators {
+			if len(g) != filtration.paramDim {
+				return complexFiltrationData{}, fmt.Errorf(
+					"invalid generator list at line %d: generator %d has length %d, expected %d",
+					lineNo, gIdx+1, len(g), filtration.paramDim,
+				)
+			}
+		}
+		filtration.oneSimplexGenerators[key] = normalizeGenerators(generators)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return complexFiltrationData{}, fmt.Errorf("error while reading complex filtration file '%s': %w", fileName, err)
+	}
+	if !headerSeen {
+		return complexFiltrationData{}, errors.New("complex filtration file is empty (no 'N,k' header found)")
+	}
+
+	return filtration, nil
+}
+
+func parsePathInline(input string) ([][]float64, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return nil, errors.New("path is empty")
+	}
+
+	var path [][]float64
+	if err := json.Unmarshal([]byte(trimmed), &path); err != nil {
+		return nil, fmt.Errorf("invalid path literal, expected JSON array of vectors, e.g. [[0,0],[1,2]]: %w", err)
+	}
+	if len(path) == 0 {
+		return nil, errors.New("path must contain at least one vector")
+	}
+	return path, nil
+}
+
+func parsePathFile(fileName string) ([][][]float64, error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open path file '%s': %w", fileName, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buffer := make([]byte, 64*1024)
+	scanner.Buffer(buffer, bufio.MaxScanTokenSize*64)
+
+	lineNo := 0
+	paths := make([][][]float64, 0)
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		path, err := parsePathInline(line)
+		if err != nil {
+			return nil, fmt.Errorf("invalid path at '%s:%d': %w", fileName, lineNo, err)
+		}
+		paths = append(paths, path)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error while reading path file '%s': %w", fileName, err)
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("path file '%s' does not contain any valid path lines", fileName)
+	}
+	return paths, nil
+}
+
+func validatePath(path [][]float64, k int) error {
+	if len(path) == 0 {
+		return errors.New("path cannot be empty")
+	}
+	for idx, point := range path {
+		if len(point) != k {
+			return fmt.Errorf("invalid path vector length at step %d: expected %d, got %d", idx+1, k, len(point))
+		}
+	}
+	for i := 1; i < len(path); i++ {
+		if !leq(path[i-1], path[i]) {
+			return fmt.Errorf("path is not totally ordered at step %d: %v !<= %v", i, path[i-1], path[i])
+		}
+	}
+	return nil
+}
+
+func formatFloat(value float64) string {
+	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+func formatVector(values []float64) string {
+	parts := make([]string, len(values))
+	for i := range values {
+		parts[i] = formatFloat(values[i])
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func formatPath(path [][]float64) string {
+	parts := make([]string, len(path))
+	for i := range path {
+		parts[i] = formatVector(path[i])
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func entryIndexAntichain(generators [][]float64, path [][]float64, neverIndex int) int {
+	best := neverIndex
+	for _, g := range generators {
+		for idx, point := range path {
+			if leq(g, point) {
+				entry := idx + 1
+				if entry < best {
+					best = entry
+				}
+				break
+			}
+		}
+	}
+	return best
+}
+
+func rowForVertex(i int, filtration complexFiltrationData, path [][]float64) string {
+	if i == 0 {
+		return ""
+	}
+	neverIndex := len(path) + 1
+	var sb strings.Builder
+	for j := 0; j < i; j++ {
+		value := neverIndex
+		if generators, ok := filtration.oneSimplexGenerators[oneSimplexKey{i: j, j: i}]; ok {
+			value = entryIndexAntichain(generators, path, neverIndex)
+		}
+		sb.WriteString(strconv.Itoa(value))
+		if j+1 < i {
+			sb.WriteByte(',')
+		}
+	}
+	return sb.String()
+}
+
+func writeAuxMatrix(outWriter *bufio.Writer, filtration complexFiltrationData, path [][]float64, numThreads int) error {
+	if numThreads < 1 {
+		numThreads = 1
+	}
+	if filtration.numVertices <= 1 {
+		return outWriter.Flush()
+	}
+
+	jobs := make(chan int, numThreads*2)
+	results := make(chan rowResult, numThreads*2)
+
+	var wg sync.WaitGroup
+	for workerID := 0; workerID < numThreads; workerID++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for row := range jobs {
+				results <- rowResult{row: row, out: rowForVertex(row, filtration, path)}
+			}
+		}()
+	}
+
+	go func() {
+		for row := 1; row < filtration.numVertices; row++ {
+			jobs <- row
+		}
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	nextRow := 1
+	pending := make(map[int]string)
+	var firstErr error
+
+	for result := range results {
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+		}
+		pending[result.row] = result.out
+
+		for {
+			line, ok := pending[nextRow]
+			if !ok {
+				break
+			}
+			if _, err := outWriter.WriteString(line + "\n"); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			delete(pending, nextRow)
+			nextRow++
+		}
+	}
+
+	if firstErr != nil {
+		return firstErr
+	}
+
+	if err := outWriter.Flush(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sanitizeRipserLine(line string) string {
+	line = strings.ReplaceAll(line, "\r", "")
+	var sb strings.Builder
+	for i := 0; i < len(line); i++ {
+		if line[i] == 0x1b {
+			// Strip CSI ANSI escape sequences such as ESC[K or ESC[31m.
+			if i+1 < len(line) && line[i+1] == '[' {
+				i += 2
+				for i < len(line) {
+					c := line[i]
+					if c >= '@' && c <= '~' {
+						break
+					}
+					i++
+				}
+				continue
+			}
+			continue
+		}
+		sb.WriteByte(line[i])
+	}
+	return strings.TrimRight(sb.String(), " \t")
+}
+
+func isInfinityToken(token string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(strings.Trim(token, ":")))
+	return normalized == "" || normalized == "inf" || normalized == "+inf" || normalized == "infinity" || normalized == "+infinity"
+}
+
+func parseIntervalLine(line string) (string, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "[") {
+		return "", "", false
+	}
+	closePos := strings.Index(trimmed, ")")
+	if closePos <= 0 {
+		return "", "", false
+	}
+	inside := strings.TrimSpace(trimmed[1:closePos])
+	parts := strings.SplitN(inside, ",", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	birth := strings.TrimSpace(parts[0])
+	death := strings.TrimSpace(parts[1])
+	return birth, death, true
+}
+
+func vectorAt(path [][]float64, oneBasedIndex int) ([]float64, bool) {
+	if oneBasedIndex < 1 || oneBasedIndex > len(path) {
+		return nil, false
+	}
+	return path[oneBasedIndex-1], true
+}
+
+func translateRipserOutput(ripserOutput string, path [][]float64) (string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(ripserOutput))
+	buffer := make([]byte, 64*1024)
+	scanner.Buffer(buffer, bufio.MaxScanTokenSize*64)
+
+	var sb strings.Builder
+	printFlag := true
+	for scanner.Scan() {
+		line := sanitizeRipserLine(scanner.Text())
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		if strings.Contains(line, "persistent homology") && strings.Contains(line, "dim 0") {
+			printFlag = false
+		} else if strings.Contains(line, "persistent homology") {
+			printFlag = true
+		}
+
+		if !printFlag {
+			continue
+		}
+
+		birthToken, deathToken, ok := parseIntervalLine(line)
+		if ok {
+			birthIndex, birthErr := strconv.Atoi(strings.TrimSpace(strings.Trim(birthToken, ":")))
+			if birthErr == nil {
+				birthPoint, birthOK := vectorAt(path, birthIndex)
+				if birthOK {
+					deathText := "inf"
+					if !isInfinityToken(deathToken) {
+						deathIndex, deathErr := strconv.Atoi(strings.TrimSpace(strings.Trim(deathToken, ":")))
+						if deathErr == nil {
+							if deathPoint, deathOK := vectorAt(path, deathIndex); deathOK {
+								deathText = formatVector(deathPoint)
+							}
+						}
+					}
+					sb.WriteString(" [")
+					sb.WriteString(formatVector(birthPoint))
+					sb.WriteString(", ")
+					sb.WriteString(deathText)
+					sb.WriteString("):\n")
+					continue
+				}
+			}
+		}
+
+		sb.WriteString(line)
+		sb.WriteByte('\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return sb.String(), nil
+}
+
+func runRipserAndTranslate(ripserExecutable string, auxFileName string, path [][]float64, dim string, modulus string, ratio string) (string, error) {
+	ripserArgs := []string{"--format", "lower-distance"}
+	if dim != "" {
+		ripserArgs = append(ripserArgs, "--dim", dim)
+	}
+	ripserArgs = append(ripserArgs, "--threshold", strconv.Itoa(len(path)))
+	if modulus != "" {
+		ripserArgs = append(ripserArgs, "--modulus", modulus)
+	}
+	if ratio != "" {
+		ripserArgs = append(ripserArgs, "--ratio", ratio)
+	}
+	ripserArgs = append(ripserArgs, auxFileName)
+
+	ripserCmd := exec.Command(ripserExecutable, ripserArgs...)
+	output, err := ripserCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to run ripser (%s): %w\n%s", ripserExecutable, err, string(output))
+	}
+
+	translated, err := translateRipserOutput(string(output), path)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse ripser output: %w", err)
+	}
+	return translated, nil
+}
+
+func inputOutputBase(inputFileName string) string {
+	dir := filepath.Dir(inputFileName)
+	base := filepath.Base(inputFileName)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	return filepath.Join(dir, stem)
+}
+
+func writeAuxToFile(fileName string, filtration complexFiltrationData, path [][]float64, numThreads int) error {
+	outFile, err := os.Create(fileName)
+	if err != nil {
+		return fmt.Errorf("failed to create auxiliary file '%s': %w", fileName, err)
+	}
+	defer outFile.Close()
+
+	outWriter := bufio.NewWriter(outFile)
+	if err := writeAuxMatrix(outWriter, filtration, path, numThreads); err != nil {
+		return fmt.Errorf("failed to write auxiliary matrix '%s': %w", fileName, err)
+	}
+	return nil
+}
+
+func parseThreads(raw string) (int, error) {
+	if raw == "" {
+		return runtime.NumCPU(), nil
+	}
+	threads, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --threads value '%s': %w", raw, err)
+	}
+	if threads < 1 {
+		return 0, errors.New("--threads must be >= 1")
+	}
+	return threads, nil
+}
+
+func normalizeArgsForRipserFlag(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	normalized := make([]string, 0, len(args))
+	normalized = append(normalized, args[0])
+
+	for idx := 1; idx < len(args); idx++ {
+		token := args[idx]
+		if token == "--ripser" || token == "-ripser" {
+			if idx+1 >= len(args) || strings.HasPrefix(args[idx+1], "-") {
+				normalized = append(normalized, token+"=")
 			} else {
-				modified_distance = index_of_entry_j
+				normalized = append(normalized, token, args[idx+1])
+				idx++
 			}
-			// fmt.Println(minima_i, index_of_entry_i, "-", minima_j, index_of_entry_j, "-", modified_distance)
-      // Concatenate modified distance to current matrix line
-      sb.WriteString(strconv.Itoa(modified_distance)) // write modified distance
-      sb.WriteByte(',')                               // write separator
-    }
-    // Send modified matrix line to out channel (to be used by writer)
-    joinLine := sb.String()
-    out <- joinLine[:len(joinLine)-1]
-  }
+			continue
+		}
+		normalized = append(normalized, token)
+	}
 
-  // Close Channel
-  close(out)
+	return normalized
 }
 
+func resolveRipserExecutable(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	candidate := trimmed
+	if candidate == "" {
+		candidate = "ripser"
+	}
 
-// Writer function
-func writer(in []chan string, out_writer *bufio.Writer) {
-
-  for {
-    for i := 0; i < len(in); i++ {
-      // Read from channel
-      line, ok := <-in[i]
-
-      // finish, when channel is closed
-      if !ok {
-        err := out_writer.Flush()
-        if err != nil {
-          log.Fatalf("Failed to flush to out_writer: %v", err)
-        }
-        return
-      }
-
-      // Write line to pipe
-      _, err := out_writer.WriteString(line)
-      if err != nil {
-        log.Fatalf("Failed to write to out_writer: %v", err)
-      }
-      // append linebreak to line
-      _, err = out_writer.WriteString("\n")
-      if err != nil {
-        log.Fatalf("Failed to write to out_writer: %v", err)
-      }
-    }
-  }
+	resolved, err := exec.LookPath(candidate)
+	if err != nil {
+		if trimmed == "" {
+			return "", errors.New("failed to locate ripser in PATH; pass --ripser <path-to-ripser> or install ripser")
+		}
+		return "", fmt.Errorf("failed to locate ripser executable '%s': %w", candidate, err)
+	}
+	return resolved, nil
 }
 
-// hash function for generating filename of auxiliary file (mainly for future development)
-func hash(s string) string {
-        h := sha256.New()
-        h.Write([]byte(s))
-        return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-
-
-
-
-
-
-
-//-------------------------------------------------------------------------
-//----------------         main        ------------------------------------
-//-------------------------------------------------------------------------
 func main() {
-	var dist_file_name string
-	var minima_file_name string
-	var path_input string
-	var threads string
+	var complexFileName string
+	var pathInput string
+	var threadsRaw string
 
 	var verbose bool
 	var help bool
 
-	var ripser bool
-	var ripser_dim string
-	var ripser_threshold string
-	var ripser_modulus string
-	var ripser_ratio string
+	var ripserInput string
+	var ripserDim string
+	var ripserModulus string
+	var ripserRatio string
 
-	var aux_file_name string
-	var aux_description string
+	flag.StringVar(&complexFileName, "complex", "", "file name of sparse multifiltration for a clique complex (CSV): header 'N,k', rows 'i,j,\"[[v1...],[v2...]]\"'.")
+	flag.StringVar(&pathInput, "path", "", "path literal (JSON array of vectors) OR path file name (one path literal per non-empty line).")
 
-
-	//
-	// Command Line Options
-	//
-
-	flag.StringVar(&dist_file_name, "dist", "", "file name of lower-triangular distance matrix.")
-
-	aux_description=`file name of pointwise minima annotation.
-
-  file content:
-    on row 'i' a comma-separated list of minimal filtration values for data point 'i'.
-    standard partial order on R^n.
-  example:
-    (0,0,1), (1,0,0)	// minima of point 1
-    (1,1,1)	// minima of point 2
-    ...
-`
-	flag.StringVar(&minima_file_name, "minima", "", aux_description)
-
-	aux_description=`command line input of sub-filtration along which to compute 1d persistence.
-
-  example:
-    [VR_0, i_0, j_0, k_0,...]-- ... --[VR_n, i_n, j_n, k_n,...]
-`
-	flag.StringVar(&path_input, "path", "", aux_description)
-
-	flag.StringVar(&threads, "threads", "", "number of threads (default: runtime.NumCPU())")
+	flag.StringVar(&threadsRaw, "threads", "", "number of threads (default: runtime.NumCPU())")
 	flag.BoolVar(&verbose, "verbose", false, "Show status messages (default: false)")
 	flag.BoolVar(&help, "help", false, "Show this help message")
-	flag.BoolVar(&ripser, "ripser", false, "run ripser on auxiliary distance matrix (default: false)\n  Requires local ripser installation in PATH ")
-	flag.StringVar(&ripser_dim, "dim", "1", "compute persistent homology up to dimension k (default: 1).")
-	flag.StringVar(&ripser_threshold, "threshold", "", "compute persistent homology up to threshold t (in auxiliary distance matrix, default: enclosing radius).")
-	flag.StringVar(&ripser_modulus, "modulus", "", "compute homology with coefficients in the prime field Z/pZ (default: 2).")
-	flag.StringVar(&ripser_ratio, "ratio", "", "only show persistence pairs with death/birth ratio > r")
+	flag.StringVar(&ripserInput, "ripser", ripserFlagDisabled, "run ripser on auxiliary entry-index matrix; optionally pass executable path.\n  Use '--ripser' for PATH lookup or '--ripser /path/to/ripser'.")
+	flag.StringVar(&ripserDim, "dim", "1", "compute persistent homology up to dimension k (default: 1).")
+	flag.StringVar(&ripserModulus, "modulus", "", "compute homology with coefficients in the prime field Z/pZ (default: 2).")
+	flag.StringVar(&ripserRatio, "ratio", "", "only show persistence pairs with death/birth ratio > r")
 
-
-	// define custom flag.Usage() to be printed upon -help call.
 	flag.Usage = func() {
-			flagSet := flag.CommandLine
-			aux_description = `Usage:
-murit --dist <filename> --minima <filename> --path (VR_0, i_0, j_0, ...)-- ... --(VR_n, i_n, j_n, ...) [--options]
-`
-			fmt.Printf(aux_description)
-			fmt.Printf("\nCommand Line Arguments\n")
-			arguments := []string{"dist", "minima", "path", "threads", "verbose", "help", "ripser"}
-			for _, name := range arguments {
-					flag := flagSet.Lookup(name)
-					fmt.Printf("-%s\n", flag.Name)
-					fmt.Printf("  %s\n", flag.Usage)
-			}
-			ripser_arguments := []string{"dim", "threshold", "modulus", "ratio"}
-			for _, name := range ripser_arguments {
-					flag := flagSet.Lookup(name)
-					fmt.Printf("	-%s\n", flag.Name)
-					fmt.Printf("	  %s\n", flag.Usage)
-			}
+		fmt.Printf("Usage:\n")
+		fmt.Printf("murit --complex <filename> --path <inline-path-or-path-file> [--options]\n\n")
+		fmt.Printf("Input formats:\n")
+		fmt.Printf("  multifiltration file for a clique complex:\n")
+		fmt.Printf("    # comments allowed\n")
+		fmt.Printf("    N,k\n")
+		fmt.Printf("    i,j,\"[[a1,...,ak],[b1,...,bk],...]\"\n")
+		fmt.Printf("    (one row per 1-simplex/edge; generator list auto-normalized to minimal antichain)\n\n")
+		fmt.Printf("  path literal:\n")
+		fmt.Printf("    JSON array of vectors.\n")
+		fmt.Printf("    [[a1,a2,...],[b1,b2,...],...]\n")
+		fmt.Printf("  path file:\n")
+		fmt.Printf("    one path literal per non-empty line, using the exact same format as above.\n")
+		fmt.Printf("    comments with '#'.\n\n")
+		fmt.Printf("Command Line Arguments\n")
+		arguments := []string{"complex", "path", "threads", "verbose", "help", "ripser", "dim", "modulus", "ratio"}
+		for _, name := range arguments {
+			option := flag.CommandLine.Lookup(name)
+			fmt.Printf("-%s\n", option.Name)
+			fmt.Printf("  %s\n", option.Usage)
+		}
 	}
 
-	// Parse
+	os.Args = normalizeArgsForRipserFlag(os.Args)
 	flag.Parse()
 
-	// print help message
 	if help {
 		flag.Usage()
 		return
 	}
 
-	// Check if required command line parameters are specified
-	if dist_file_name == "" {
-		log.Fatal("dist file name required (--dist_file)")
+	if complexFileName == "" {
+		log.Fatal("complex filtration file required (--complex)")
 	}
-	if minima_file_name == "" {
-		log.Fatal("filtration file name required (--minima_file)")
+	if pathInput == "" {
+		log.Fatal("path input required (--path)")
 	}
 
-
-	// Read filtration file
-	if verbose {fmt.Println("Pointwise minima")}
-	minima_file, err := os.Open(minima_file_name)
+	threads, err := parseThreads(threadsRaw)
 	if err != nil {
-		log.Fatalf("Failed to open file '%s': %v", minima_file_name, err)
+		log.Fatalf("thread parsing error: %v", err)
 	}
 
-	var minima_list [][][]float64
-	minima_scanner := bufio.NewScanner(minima_file)
-	for minima_scanner.Scan() {
-		var minima [][]float64
-		// assume each line is a comma-separated list of minima in the format (a_1, a_2, ...), (b_1, b_2, ...)
-		line := minima_scanner.Text()
-		// split lines into separate minima (a_1, a_2, ...)
-		for _, x := range strings.Split(line, "),("){
-			// convert the separated minimum into a list of floats value, by value
-			var minimum []float64
-			for _, value_str := range strings.Split(strings.Trim(x, " ()"), ",") {
-				value_float, err := strconv.ParseFloat(value_str, 64)
-				if err != nil {
-					log.Fatalf("Filtration parse error: %v", err)
-				}
-				minimum = append(minimum, value_float)
-			}
-			minima = append(minima, minimum)
+	runRipser := ripserInput != ripserFlagDisabled
+	ripserExecutable := ""
+	if runRipser {
+		ripserExecutable, err = resolveRipserExecutable(ripserInput)
+		if err != nil {
+			log.Fatal(err)
 		}
-		minima_list = append(minima_list, minima)
 	}
-	if verbose {fmt.Println(minima_list)}
-	// Close filtration file
-	minima_file.Close()
 
+	filtration, err := parseComplexFiltrationFile(complexFileName)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-  // Read sub filtration from command line OR create default sub filtration
-	var path [][]float64
-	if path_input != "" {
-		// Parse sub filtration from command line input
-		for _, p := range strings.Split(path_input,"--"){
-			var point []float64
-			for _, q := range strings.Split(strings.Trim(p, " []"),","){
-				s, err := strconv.ParseFloat(q,64)
-				if err != nil {
-					log.Fatalf("Filtration parse error: %v", err)
-				}
-				point = append(point, s)
-			}
-			path = append(path, point)
+	pathInputTrimmed := strings.TrimSpace(pathInput)
+	inlinePathMode := strings.HasPrefix(pathInputTrimmed, "[")
+
+	var paths [][][]float64
+	if inlinePathMode {
+		path, err := parsePathInline(pathInputTrimmed)
+		if err != nil {
+			log.Fatal(err)
 		}
-		// Check if sub filtration is valid (i.e. in lexicographical order)
-		for i, j := 0, 1; j < len(path); i, j = i+1, j+1 {
-			if !(leq(path[i], path[j])) {
-				log.Fatalf("Invalid Path: path[%v] = %v !<= %v = path[%v]", i, path[i], path[j], j)
-			}
-		}
+		paths = [][][]float64{path}
 	} else {
-		// Extract a valid sub filtration from the filtration file (traverse through list once and successively add larger elements)
-		path = append(path, append([]float64{0}, minima_list[0][0]...))
-		for _, x := range minima_list {
-			if leq(path[len(path)-1], append([]float64{1}, x[0]...)) && !equal(path[len(path)-1], append([]float64{1}, x[0]...)) {
-				path = append(path, append([]float64{1}, x[0]...))
-			}
+		paths, err = parsePathFile(pathInputTrimmed)
+		if err != nil {
+			log.Fatal(err)
 		}
 	}
-  if verbose {
-		fmt.Println("\nPath")
-		outer_sep := ""
-		for _, fltr_point := range path {
-			inner_sep := ""
-			fmt.Print(outer_sep,"[")
-			for _, value := range fltr_point{
-				fmt.Print(inner_sep, value)
-				inner_sep = ","
+
+	for pathIdx, path := range paths {
+		if err := validatePath(path, filtration.paramDim); err != nil {
+			if inlinePathMode {
+				log.Fatalf("invalid path: %v", err)
 			}
-			fmt.Print("]")
-			outer_sep = "--"
+			log.Fatalf("invalid path at line %d of '%s': %v", pathIdx+1, pathInputTrimmed, err)
 		}
-		fmt.Print("\n")
 	}
 
+	if verbose {
+		fmt.Println("Clique Complex Filtration")
+		fmt.Printf("N=%d vertices, k=%d parameters, listed 1-simplices=%d\n", filtration.numVertices, filtration.paramDim, len(filtration.oneSimplexGenerators))
+		fmt.Printf("Paths=%d\n", len(paths))
+	}
 
-	//
-  // Prepare Input and Communication Channels
-	//
+	if inlinePathMode {
+		path := paths[0]
+		if verbose {
+			fmt.Println("\nPath")
+			fmt.Println(formatPath(path))
+		}
 
-	// In future development:
-	// Set filename of auxiliary distance matrix in dependence of path
-	// aux_file_name = filepath.Dir(dist_file_name)+"/"+hash(path_input)+".aux"
-	aux_file_name = filepath.Dir(dist_file_name)+"/"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10)+".aux"
+		if !runRipser {
+			if verbose {
+				fmt.Println("\nAuxiliary Entry-Index Matrix")
+			}
+			outWriter := bufio.NewWriter(os.Stdout)
+			if err := writeAuxMatrix(outWriter, filtration, path, threads); err != nil {
+				log.Fatalf("failed to create auxiliary entry-index matrix: %v", err)
+			}
+			return
+		}
 
-  // Concatenate background information from above for workers
-  b := args{path, minima_list}
+		tempFile, err := os.CreateTemp(filepath.Dir(complexFileName), "murit-inline-*.aux")
+		if err != nil {
+			log.Fatalf("failed to create temporary auxiliary file: %v", err)
+		}
+		tempName := tempFile.Name()
+		tempFile.Close()
+		defer os.Remove(tempName)
 
-  // Open distance matrix file
-  in_file, err := os.Open(dist_file_name)
-  if err != nil {
-    log.Fatalf("Failed to open file '%s': %v", dist_file_name, err)
-  }
-  defer in_file.Close()   // defer closing of in_file until main() is closed
+		if err := writeAuxToFile(tempName, filtration, path, threads); err != nil {
+			log.Fatal(err)
+		}
 
-  // Initialize communication channels
-  var numThreads int
-	if threads == "" {
-		numThreads = runtime.NumCPU()
+		if verbose {
+			fmt.Println("\nRipser")
+		}
+		translated, err := runRipserAndTranslate(ripserExecutable, tempName, path, ripserDim, ripserModulus, ripserRatio)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Print(translated)
+		return
+	}
+
+	base := inputOutputBase(complexFileName)
+	type pathSummary struct {
+		pathIndex   int
+		auxFile     string
+		ripserFile  string
+		pathLiteral string
+	}
+	summaries := make([]pathSummary, 0, len(paths))
+
+	for idx, path := range paths {
+		pathNumber := idx + 1
+		auxFile := fmt.Sprintf("%s_path%02d.aux", base, pathNumber)
+
+		if verbose {
+			fmt.Printf("\nPath %d\n", pathNumber)
+			fmt.Println(formatPath(path))
+			fmt.Printf("Writing auxiliary matrix to %s\n", auxFile)
+		}
+
+		if err := writeAuxToFile(auxFile, filtration, path, threads); err != nil {
+			log.Fatal(err)
+		}
+
+		summary := pathSummary{
+			pathIndex:   pathNumber,
+			auxFile:     auxFile,
+			pathLiteral: formatPath(path),
+		}
+
+		if runRipser {
+			if verbose {
+				fmt.Printf("Running ripser for path %d\n", pathNumber)
+			}
+
+			translated, err := runRipserAndTranslate(ripserExecutable, auxFile, path, ripserDim, ripserModulus, ripserRatio)
+			if err != nil {
+				log.Fatalf("ripser failed for path %d: %v", pathNumber, err)
+			}
+
+			ripserFile := fmt.Sprintf("%s_path%02d.ripser", base, pathNumber)
+			if err := os.WriteFile(ripserFile, []byte(translated), 0o644); err != nil {
+				log.Fatalf("failed to write ripser output file '%s': %v", ripserFile, err)
+			}
+			summary.ripserFile = ripserFile
+		}
+
+		summaries = append(summaries, summary)
+	}
+
+	fmt.Printf("Processed %d path(s) from %s\n", len(summaries), pathInputTrimmed)
+	for _, summary := range summaries {
+		if runRipser {
+			fmt.Printf("Path %02d: aux=%s, ripser=%s\n", summary.pathIndex, summary.auxFile, summary.ripserFile)
 		} else {
-		numThreads, err = strconv.Atoi(threads)
-		if err != nil {
-			log.Fatalf("thread parsing error: %v", err)
+			fmt.Printf("Path %02d: aux=%s\n", summary.pathIndex, summary.auxFile)
 		}
 	}
-
-	toWorker := make([]chan workload, numThreads)
-	toWriter := make([]chan string, numThreads)
-	for i := 0; i < numThreads; i++ {
-		toWorker[i] = make(chan workload, 100)
-		toWriter[i] = make(chan string, 100)
-	}
-
-  // Initialize buffered writer
-  var out_writer *bufio.Writer
-  aux_file, err := os.Create(aux_file_name)
-  			if err != nil {
-  				log.Fatalf("Failed to create file '%s': %v", aux_file_name, err)
-  			}
-  defer aux_file.Close()
-  if ripser {
-    out_writer = bufio.NewWriter(aux_file)
-  } else {
-		if verbose {fmt.Println("\nAuxiliary Distance Matrix")}
-    out_writer = bufio.NewWriter(os.Stdout)
-  }
-
-
-	//
-  // Parallel Execution
-	//
-
-	// Start reader
-	go reader(in_file, toWorker)
-
-	// Start workers
-	for i := 0; i < numThreads; i++ {
-		go worker(toWorker[i], toWriter[i], b)
-	}
-
-  // Start writer
-	writer(toWriter, out_writer)
-
-
-
-	//
-	// Calculate Persistent Homology with Ripser
-	//
-
-	// Run ripser on auxiliary distance matrix
-  var ripser_output []byte
-	if ripser {
-		if verbose {fmt.Println("\nRipser")}
-
-		ripser_arguments := []string{"--format", "lower-distance"}
-		if ripser_dim != ""{
-			ripser_arguments = append(ripser_arguments, "--dim", ripser_dim)
-		}
-		if ripser_threshold != ""{
-			ripser_arguments = append(ripser_arguments, "--threshold", ripser_threshold)
-		}
-		if ripser_modulus != ""{
-			ripser_arguments = append(ripser_arguments, "--modulus", ripser_modulus)
-		}
-		if ripser_ratio != ""{
-			ripser_arguments = append(ripser_arguments, "--ratio", ripser_ratio)
-		}
-		ripser_arguments = append(ripser_arguments, aux_file_name)
-
-    ripser_cmd := exec.Command("ripser", ripser_arguments...)
-
-    var err error
-		ripser_output, err = ripser_cmd.CombinedOutput()
-		if err != nil {
-			log.Fatalf("Failed to run command: %v\nCommand output: %s", err, string(ripser_output))
-		}
-
-	}
-
-  err = os.Remove(aux_file_name)
-  if err != nil {
-		log.Fatalf("Failed to delete auxiliary distance matrix: %v", err)
-	}
-
-  // Translate ripser output of barcodes into barcodes on subfiltration
-  print_flag := true
-  scanner := bufio.NewScanner(strings.NewReader(string(ripser_output)))
-  for scanner.Scan() {
-    line := scanner.Text()
-
-    if strings.Contains(line, "persistent homology") && strings.Contains(line, "dim 0") {
-      print_flag = false
-    } else if strings.Contains(line, "persistent homology") {
-      print_flag = true
-    }
-
-    if print_flag {
-      if strings.HasPrefix(line, " [") {
-        line = strings.Trim(line, " [):")
-        x := strings.Split(line, ",")
-
-        birth, err := strconv.Atoi(x[0])
-        if err != nil {
-    			log.Fatalf("parsing error: %v", err)
-    		}
-				// shift from one- to zero-indexing
-        birth = birth-1
-
-        death, err := strconv.Atoi(x[1])
-        if err != nil {
-    			log.Fatalf("parsing error: %v", err)
-    		}
-				// shift from one- to zero-indexing
-        death = death-1
-
-        fmt.Println(" [", path[birth], ",", path[death], "):")
-      } else {
-        fmt.Println(line)
-      }
-    }
-  }
-
 }
