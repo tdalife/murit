@@ -20,6 +20,8 @@ Pathwise reduction used by MuRiT:
 - run ripser on that auxiliary matrix,
 - translate interval endpoints from indices back to filtration vectors on the path.
 
+Remark: In the current version, MuRiT computes persistent homology in dimensions greater than 1 for multifiltered clique complexes. However, since Ripser only supports lower triangular distance matrices, vertex filtrations cannot be directly encoded. As a consequence, the results in dimension 0 may differ whenever not all vertices are included at filtration step 0.
+
 ## Run
 Run with the `murit` executable:
 ```bash
